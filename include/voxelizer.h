@@ -653,7 +653,7 @@
 namespace vox {
 
 ///////////////////////////////////////////////////////////////////////////////
-/// \brief Result type of all voxelization operations. 
+/// \brief Result type of most voxelization operations. 
 /// 
 /// Functions that advertise to return device pointers return a vector of \p 
 /// NodePointer structs, one for each device used in the voxelization. 
@@ -682,6 +682,29 @@ struct NodePointer {
     uint3 dim;          ///< Dimensions of the \p Node grid.
     uint3 loc;          ///< Location of the \p Node grid.
 };
+///////////////////////////////////////////////////////////////////////////////
+/// \brief Result type of voxelization operations with two arrays.
+///
+/// Analogous to \p NodePointer. This one contains two arrays of different 
+/// \p Node types -- one for solid nodes and another for surface nodes. The 
+/// surface nodes are accessed through a hash map, which maps solid node 
+/// indices to surface node indices.
+///
+/// \tparam VolumeNode Type of node to use for the vast majority of nodes, ie. 
+///                    the solid nodes.
+/// \tparam SurfaceNode Type of node to use for the surface voxels.
+///////////////////////////////////////////////////////////////////////////////
+template <class VolumeNode, class SurfaceNode>
+struct Node2APointer {
+    VolumeNode * nodes;      ///< Array of all nodes in the voxelization.
+    SurfaceNode * surfNodes; ///< Array of (large sized) surface nodes.
+    HashMap indices;         ///< Maps coordinates to indices into surfNodes.
+
+    int dev;            ///< Device id the data resides on, if applicable.
+    uint3 dim;          ///< Dimensions of the \p Node grid.
+    uint3 loc;          ///< Location of the \p Node grid.
+    uint nrOfSurfNodes; ///< Size of the surfNodes array.
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 /// \brief Class that encapsulates the voxelizer. 
@@ -701,7 +724,7 @@ struct NodePointer {
 /// \tparam Node Type of \p Node to be used in the result. Applies to all 
 ///              functions that claim to return \p Nodes.
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node = ShortNode>
+template <class Node = ShortNode, class SNode = SurfaceNode>
 class Voxelizer
 {
 public:
@@ -792,6 +815,37 @@ public:
                           , uint  slice
                           , uint2 voxSplitRes = make_uint2( 1024, 512 )
                           , uint2 matSplitRes = make_uint2( 512, 512 ) );
+    /// Voxelizes with large surface nodes.
+    std::vector<Node2APointer<Node, SNode> >
+        voxelizeToSurfaceNodes( 
+            double cubeLength, 
+            uint2 devConfig = make_uint2( 1, 1 ),
+            uint3 voxSplitRes = make_uint3( 1024, 512, 512 ), 
+            uint3 matSplitRes = make_uint3( 512, 512, 512 )
+        );
+    /// Voxelizes with large surface nodes.
+    std::vector<Node2APointer<Node, SNode> >
+        voxelizeToSurfaceNodes( 
+            uint maxDimension, 
+            uint2 devConfig = make_uint2( 1, 1 ),
+            uint3 voxSplitRes = make_uint3( 1024, 512, 512 ), 
+            uint3 matSplitRes = make_uint3( 512, 512, 512 )
+        );
+    /// Voxelizes with large surface nodes, returning host pointers.
+    Node2APointer<Node, SNode>
+        voxelizeToSurfaceNodesToRAM( 
+            double cubeLength, 
+            uint3 voxSplitRes = make_uint3( 1024, 512, 512 ), 
+            uint3 matSplitRes = make_uint3( 512, 512, 512 )
+        );
+    /// Voxelizes with large surface nodes, returning host pointers.
+    Node2APointer<Node, SNode>
+        voxelizeToSurfaceNodesToRAM( 
+            uint maxDimension, 
+            uint3 voxSplitRes = make_uint3( 1024, 512, 512 ), 
+            uint3 matSplitRes = make_uint3( 512, 512, 512 )
+        );
+
     ///////////////////////////////////////////////////////////////////////////
     /// \brief Returns the distance between voxel centers.
     ///
@@ -851,8 +905,14 @@ public:
     }
     /// Define materials for the model.
     void setMaterials( uchar const * _materials, uint _nrOfUniqueMaterials );
-    /// Enables or disabeles material output.
+    /// Enables or disables material output.
     void setMaterialOutput( bool _materials ) throw();
+	/// Enables or disables orientations output.
+    void setOrientationsOutput( bool _orientations  ) throw();
+	/// Enables or disables center of voxel for comparison.
+    void setDisplace_VoxSpace_dX_2( bool _displace_VoxSpace_dX_2  ) throw();
+	/// Was the domain already displaced by dX_2...
+    void setIs_displaced( bool _is_displaced  ) throw();
     /// Enables or disables messages to the standard output stream.
     void verboseOutput( bool verbose ) throw();
     /// Calculates how large the \p Node array is going to be.
@@ -869,7 +929,7 @@ public:
 
 private:
     /// Array of DevContexts.
-    typedef boost::scoped_array<DevContext<Node> > Devices;
+    typedef boost::scoped_array<DevContext<Node,SNode> > Devices;
 
     // Variable declarations.
 
@@ -900,7 +960,7 @@ private:
     /// Clears all dynamically allocated memory related to the voxelization.
     void deallocate();
     /// Clears the dynamically allocated memory related to plain voxelization.
-    void deallocateVoxelizationData( DevContext<Node> & device );
+    void deallocateVoxelizationData( DevContext<Node,SNode> & device );
     /// Calculates the bounding box of the \p Node / voxel array.
     void determineBBAndResolution();
     /// Calculates the bounding box of the \p Node or voxel array.
@@ -912,7 +972,7 @@ private:
     /// Makes the x-length divisible by 32 times the number of xSplits.
     void adjustResolution( uint xSplits );
     /// Calculates the <em>offset buffer</em>
-    void prepareForConstructWorkQueue( DevContext<Node> & device );
+    void prepareForConstructWorkQueue( DevContext<Node,SNode> & device );
     /// Splits a space into subspaces by constraining each direction.
     SplitData<uint3>
         splitResolutionByMaxDim( uint3 const & maxDimensions
@@ -941,29 +1001,29 @@ private:
     void performVoxelization( Bounds<uint2> yzSubSpace
                             , uint			     xRes
                             , uint			     nrOfXSlices
-                            , DevContext<Node> & device );
+                            , DevContext<Node,SNode> & device );
     /// Opens an output \p filestream.
     void openLog( char const * filename );
     /// Writes verious information about the voxelization settings to file.
-    void printGeneralInfo( DevContext<Node> & device );
+    void printGeneralInfo( DevContext<Node,SNode> & device );
     /// Writes the <em>tile overlap array</em> contents to file.
-    void printTileOverlaps( DevContext<Node> & device, MainAxis direction );
+    void printTileOverlaps( DevContext<Node,SNode> & device, MainAxis direction );
     /// Writes the <em>offset buffer</em> contents to file.
-    void printOffsetBuffer( DevContext<Node> & device, MainAxis direction );
+    void printOffsetBuffer( DevContext<Node,SNode> & device, MainAxis direction );
     /// Prints the entire <em>work queue</em> contents to file.
-    void printWorkQueue( DevContext<Node> & device, MainAxis direction );
+    void printWorkQueue( DevContext<Node,SNode> & device, MainAxis direction );
     /// Prints the entire <em>sorted work queue</em> contents to file.
-    void printSortedWorkQueue( DevContext<Node> & device, MainAxis direction );
+    void printSortedWorkQueue( DevContext<Node,SNode> & device, MainAxis direction );
     /// Prints the <em>compacted tile list</em> contents to file.
-    void printCompactedList( DevContext<Node> & device, MainAxis direction );
+    void printCompactedList( DevContext<Node,SNode> & device, MainAxis direction );
     /// Closes the output \p filestream.
     void closeLog();
     /// Helper function to determine some stats about the graphics card.
     inline int convertSMVer2Cores(int major, int minor) const;
     /// Allocates an always fixed amount of memory.
-    void allocStaticMem( DevContext<Node> & device );
+    void allocStaticMem( DevContext<Node,SNode> & device );
     /// Reallocates memory when more is needed.
-    void reAllocDynamicMem( DevContext<Node> & device, float multiplier);
+    void reAllocDynamicMem( DevContext<Node,SNode> & device, float multiplier);
     /// Entry function for every kind of voxelization.
     void voxelizeEntry( uint2 deviceConfig = make_uint2( 1, 1 ), 
                         uint3 voxSplitRes = make_uint3( 1024, 512, 512 ), 
@@ -974,13 +1034,19 @@ private:
                          uint  xSplits, 
                          uint3 voxSplitRes,
                          uint3 matSplitRes,
-                         DevContext<Node> & device );
+                         DevContext<Node,SNode> & device );
+    /// Specialized worker function for voxelizations with two arrays.
+    void twoNodeArraysWorker( uint  xRes
+                            , uint  xSplits
+                            , uint3 voxSplitRes
+                            , uint3 matSplitRes
+                            , DevContext<Node,SNode> & device );
     /// Specialized worker function for FCC-related \p Nodes.
     void fccWorker( uint  xRes
                   , uint  xSplits
                   , uint3 voxSplitRes
                   , uint3 matSplitRes
-                  , DevContext<Node> & device );
+                  , DevContext<Node,SNode> & device );
     /// Prepares the voxelizer with a new max array length.
     void setResolution( uint resolution ) { 
         this->hostVars.resolution.min = make_uint3( 0, 0, 0 ); 
@@ -991,13 +1057,101 @@ private:
     /// Restores the coordinates of a vector to their un-rotated form.
     uint3 unRotateCoords( uint3 vec, uint xDim );
     /// Resets certain data structures to their default values.
-    void resetDataStructures( DevContext<Node> & device );
+    void resetDataStructures( DevContext<Node,SNode> & device );
     /// Constructs the <tt>vector<NodePointer></tt> returnable.
     std::vector<NodePointer<Node> > collectData();
     /// Constructs the \p NodePointer returnable.
-    NodePointer<Node> collectData( DevContext<Node> & device
+    NodePointer<Node> collectData( DevContext<Node,SNode> & device
                                  , const bool hostPointers );
+    /// Constructs the <tt>vector<Node2APointer></tt> returnable.
+    std::vector<Node2APointer<Node, SNode> > collectSurfData();
+    /// Constructs the \p Node2APointer returnable.
+    Node2APointer<Node, SNode> collectSurfData( DevContext<Node,SNode> & device
+                                              , const bool         hostPointers
+                                              );
 };
+
+///////////////////////////////////////////////////////////////////////////////
+/// Traverses each vertex of the triangle and finds the minimum and maximum
+/// coordinate components and uses them to construct the minimum and maximum
+/// corners of the bounding box.
+/// This version uses \p float3.
+///////////////////////////////////////////////////////////////////////////////
+inline __host__ __device__ void getTriangleBounds
+    ( float3 const * vertices ///< [in] Vertices of the triangle.
+    , Bounds<float3> & bounds ///< [out] Bounding box of the triangle.
+    )
+{
+    bounds.min = vertices[0];
+    bounds.max = vertices[0];
+
+    // Traverse each vertex and find the smallest / largest coordinates.
+    for (int i = 1; i < 3; i++)
+    {
+        if (vertices[i].x < bounds.min.x)
+            bounds.min.x = vertices[i].x;
+        if (vertices[i].y < bounds.min.y)
+            bounds.min.y = vertices[i].y;
+        if (vertices[i].z < bounds.min.z)
+            bounds.min.z = vertices[i].z;
+
+        if (vertices[i].x > bounds.max.x)
+            bounds.max.x = vertices[i].x;
+        if (vertices[i].y > bounds.max.y)
+            bounds.max.y = vertices[i].y;
+        if (vertices[i].z > bounds.max.z)
+            bounds.max.z = vertices[i].z;
+    }
+
+    return;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+/// The minimum corner is floored and the maximum corner is ceiled.
+/// Expects the triangle's bounding box to be made of \p float3 and returns a
+/// bounding box made of \p uint3.
+///////////////////////////////////////////////////////////////////////////////
+
+// 		!! This one is inside device_code.h !!
+inline __host__ __device__ void getVoxelBounds
+    ( Bounds<float3> const & triBB   ///< [in] Triangle's bounding box.
+    , float3 const & modelBBMin      /**< [in] Minimum corner of the device's
+                                               voxelization space. */
+    , Bounds<uint3> & voxBB          /**< [out] Triangle's bounding
+                                                box in voxel coordinates. */
+    , float d                        ///< [in] Distance between voxel centers.
+    )
+{
+    /* Convert to fractional voxel coordinates, then take their floor for the
+       minimum and ceiling for the maximum coodinates. */
+    voxBB.min = make_uint3( uint( floorf( (triBB.min.x - modelBBMin.x) / d) )
+                          , uint( floorf( (triBB.min.y - modelBBMin.y) / d) )
+                          , uint( floorf( (triBB.min.z - modelBBMin.z) / d) ));
+    voxBB.max = make_uint3( uint( ceilf( (triBB.max.x - modelBBMin.x) / d) )
+                          , uint( ceilf( (triBB.max.y - modelBBMin.y) / d) )
+                          , uint( ceilf( (triBB.max.z - modelBBMin.z) / d) ) );
+    return;
+}
+
+inline __host__ __device__ void getVoxelBounds
+    ( Bounds<double3> const & triBB   ///< [in] Triangle's bounding box.
+    , double3 const & modelBBMin      /**< [in] Minimum corner of the device's
+                                               voxelization space. */
+    , Bounds<uint3> & voxBB          /**< [out] Triangle's bounding
+                                                box in voxel coordinates. */
+    , float d                        ///< [in] Distance between voxel centers.
+    )
+{
+    /* Convert to fractional voxel coordinates, then take their floor for the
+       minimum and ceiling for the maximum coodinates. */
+    voxBB.min = make_uint3( uint( floorf( (triBB.min.x - modelBBMin.x) / d) )
+                          , uint( floorf( (triBB.min.y - modelBBMin.y) / d) )
+                          , uint( floorf( (triBB.min.z - modelBBMin.z) / d) ));
+    voxBB.max = make_uint3( uint( ceilf( (triBB.max.x - modelBBMin.x) / d) )
+                          , uint( ceilf( (triBB.max.y - modelBBMin.y) / d) )
+                          , uint( ceilf( (triBB.max.z - modelBBMin.z) / d) ) );
+    return;
+}
 
 } // End namespace vox
 

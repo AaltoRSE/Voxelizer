@@ -26,6 +26,14 @@ void compactWorkQueue(
     uint          * tileOffsets_gpu,
     clock_t		    startTime, 
     bool	        verbose );
+/// 
+template <class Node>
+void calcSurfNodeCount
+    ( CommonDevData & devData
+    , Node * nodes
+    , clock_t startTime
+    , bool verbose
+    );
 /// Calculates the number of overlapping tiles for each triangle.
 void calcTileOverlap(
     CommonDevData  const & devData,
@@ -80,13 +88,14 @@ template <class Node> void launchConvertToFCCGrid(
     clock_t				  startTime, 
     bool				  verbose );
 /// Calculates the boundary ids of each node.
-template <class Node> void procNodeList(
+template <class Node, class SNode> void procNodeList(
     CommonDevData const & devData, 
     Node                * nodes_gpu,
     Node                * nodesCopy_gpu,
     bool                * error_gpu,
     Bounds<uint2> const & yzSubSpace,
     bool                  xSlicing,
+    SNode               * surfNodes,
     clock_t				  startTime, 
     bool				  verbose );
 /// Calculates the boundary ids of each FCC node.
@@ -119,7 +128,7 @@ void calcTriangleClassification(
     clock_t		           startTime, 
     bool		           verbose );
 /// Calculates a surface voxelization with the optimized surface voxelizer.
-template <class Node> 
+template <class Node, class SNode> 
 void calcOptSurfaceVoxelization(
     CommonDevData  const & devData, 
     CommonHostData const & hostData, 
@@ -131,6 +140,8 @@ void calcOptSurfaceVoxelization(
     Node                 * nodes_gpu, 
     Bounds<uint3>  const & subSpace,
     int                    gridType,
+    bool                   countVoxels,
+    SNode                * surfNodes,
     clock_t                startTime, 
     bool                   verbose );
 /// Makes the outermost nodes of the array zero.
@@ -149,6 +160,13 @@ void restoreRotatedNodes( CommonDevData const & devData,
                           Bounds<uint2> const & yzSubSpace,
                           clock_t               startTime,
                           bool                  verbose );
+///
+template <class Node>
+void populateHashMap
+    ( CommonDevData       & devData
+    , Node                * nodes_gpu
+    , clock_t               startTime
+    , bool                  verbose );
 
 } // End namespace vox
 

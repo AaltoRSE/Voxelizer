@@ -10,6 +10,7 @@
 //#include <sm_12_atomic_functions.h>
 #include <sm_20_atomic_functions.h>
 #include <sm_35_atomic_functions.h>
+#include <math_functions.h>
 
 #include <thrust/host_vector.h>
 #include <thrust/functional.h>
@@ -18,9 +19,14 @@
 #include <thrust/copy.h>
 #include <thrust/unique.h>
 #include <thrust/count.h>
+#if defined(unix) || defined(__unix__) || defined(__unix)
+#include <thrust/device_malloc.h>
+#include <thrust/device_free.h>
+#endif 
 
 #include <iostream>
 #include <ctime>
+#include <float.h>
 
 namespace vox {
 
@@ -108,6 +114,30 @@ void compactWorkQueue(
     thrust::device_free(iv);
 
     checkCudaErrors( "compactWorkQueue" );
+}
+///////////////////////////////////////////////////////////////////////////////
+///
+///////////////////////////////////////////////////////////////////////////////
+template <class Node>
+void calcSurfNodeCount
+    ( CommonDevData & devData
+    , Node * nodes
+    , clock_t startTime
+    , bool verbose
+    )
+{
+    if (verbose) 
+        std::cout << (clock() - startTime) << ": Calling calcSurfNodeCount.\n";
+
+    thrust::device_ptr<Node> nDevPtr = thrust::device_pointer_cast<Node>( nodes );
+
+    uint count = thrust::count_if( nDevPtr
+                                 , nDevPtr + devData.nrOfNodes
+                                 , NodeBidEquals<Node, 1>() );
+
+    devData.nrOfSurfaceNodes = count;
+
+    checkCudaErrors( "calcSurfNodeCount" );
 }
 ///////////////////////////////////////////////////////////////////////////////
 /// Handles the calculating of the <em>tile overlap buffer</em> by calling the 
@@ -376,13 +406,14 @@ template <class Node> void launchConvertToFCCGrid(
 /// \param[in] startTime Time when the program started executing.
 /// \param[in] verbose Whether or not to print what is being done.
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node> void procNodeList(
+template <class Node, class SNode> void procNodeList(
     CommonDevData const & devData, 
     Node                * nodes_gpu,
     Node                * nodesCopy_gpu,
     bool                * error_gpu,
     Bounds<uint2> const & yzSubSpace,
     bool                  xSlicing,
+    SNode               * surfNodes,
     clock_t				  startTime, 
     bool				  verbose )
 {
@@ -397,11 +428,15 @@ template <class Node> void procNodeList(
     Node * nodePtr = xSlicing ? nodesCopy_gpu
                               : nodes_gpu;
     
-    fillNodeList2<Node>
+    fillNodeList2<Node,SNode>
         <<< blocks, threadsPerBlock >>>( nodePtr, 
                                          devData.allocResolution, 
                                          yzSubSpace,
-                                         error_gpu );
+                                         error_gpu,
+                                         devData.hashMap,
+                                         surfNodes );
+
+    cudaDeviceSynchronize();
 
     checkCudaErrors( "procNodeList" );
 }
@@ -611,7 +646,7 @@ void calcTriangleClassification(
 /// \param[in] startTime Time when the program started executing.
 /// \param[in] verbose Whether or not to print what is being done.
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node> 
+template <class Node, class SNode> 
 void calcOptSurfaceVoxelization(
     CommonDevData  const & devData, 
     CommonHostData const & hostData, 
@@ -623,11 +658,13 @@ void calcOptSurfaceVoxelization(
     Node                 * nodes_gpu, 
     Bounds<uint3>  const & subSpace,
     int                    gridType,
+    bool                   countVoxels,
+    SNode                * surfNodes,
     clock_t                startTime, 
     bool                   verbose )
 {
-    uint blocks = devData.blocks;
-    uint threadsPerBlock = devData.threads;
+    uint blocks = 32;//devData.blocks;
+    uint threadsPerBlock = 64;//devData.threads;
 
     float3 modelBBMin = make_float3( float(devData.extMinVertex.x), 
                                      float(devData.extMinVertex.y), 
@@ -642,7 +679,7 @@ void calcOptSurfaceVoxelization(
                     threadsPerBlock << ">>> (" << subSpace.min.x << ", " << 
                     subSpace.min.y << ", " << subSpace.min.z << ")\n";
 
-        process1DTriangles<Node>
+        process1DTriangles<Node, SNode>
             <<< blocks, 
                 threadsPerBlock >>>( vertices_gpu, 
                                      indices_gpu, 
@@ -660,8 +697,15 @@ void calcOptSurfaceVoxelization(
                                      float(hostData.voxelLength),
                                      devData.extResolution,
                                      subSpace,
-                                     gridType );
+                                     gridType,
+                                     countVoxels,
+                                     devData.hashMap,
+                                     surfNodes );
+
+        cudaDeviceSynchronize();
     }
+
+    checkCudaErrors( "process1DTriangles" );
 
     // Process and voxelize triangles with a 2-dimensional bounding box.
     if (hostData.start2DTris != hostData.end2DTris) 
@@ -672,7 +716,7 @@ void calcOptSurfaceVoxelization(
                     threadsPerBlock << ">>> (" << subSpace.min.x << ", " << 
                     subSpace.min.y << ", " << subSpace.min.z << ")\n";
 
-        process2DTriangles<Node>
+        process2DTriangles<Node, SNode>
             <<< blocks, 
                 threadsPerBlock >>>( vertices_gpu, 
                                      indices_gpu, 
@@ -690,8 +734,15 @@ void calcOptSurfaceVoxelization(
                                      float(hostData.voxelLength),
                                      devData.extResolution,
                                      subSpace,
-                                     gridType );
+                                     gridType,
+                                     countVoxels,
+                                     devData.hashMap,
+                                     surfNodes );
+
+        cudaDeviceSynchronize();
     }
+
+    checkCudaErrors( "process2DTriangles" );
 
     // Process and voxelize triangles with a 3-dimensional bounding box.
     if (hostData.start3DTris != hostData.end3DTris) 
@@ -702,7 +753,7 @@ void calcOptSurfaceVoxelization(
                     threadsPerBlock << ">>> (" << subSpace.min.x << ", " << 
                     subSpace.min.y << ", " << subSpace.min.z << ")\n";
 
-        process3DTriangles<Node>
+        process3DTriangles<Node, SNode>
             <<< blocks, 
                 threadsPerBlock >>>( vertices_gpu, 
                                      indices_gpu, 
@@ -720,7 +771,12 @@ void calcOptSurfaceVoxelization(
                                      float(hostData.voxelLength),
                                      devData.extResolution,
                                      subSpace,
-                                     gridType );
+                                     gridType,
+                                     countVoxels,
+                                     devData.hashMap,
+                                     surfNodes );
+
+        cudaDeviceSynchronize();
     }
 
     checkCudaErrors( "calcOptSurfaceVoxelization" );
@@ -803,6 +859,35 @@ void restoreRotatedNodes( CommonDevData const & devData,
                                          yzSubSpace );
 
     checkCudaErrors( "restoreRotatedNodes" );
+}
+///////////////////////////////////////////////////////////////////////////////
+///
+///////////////////////////////////////////////////////////////////////////////
+template <class Node>
+void populateHashMap
+    ( CommonDevData       & devData
+    , Node                * nodes_gpu
+    , clock_t               startTime
+    , bool                  verbose )
+{
+    if ( !Node::usesTwoArrays() )
+        return;
+
+    const uint blocks = 1;
+    const dim3 threadsPerBlock(32, 32);
+
+    if (verbose) 
+        std::cout << (clock() - startTime) << ": Calling populateHashMap"
+                     "<<<" << blocks << ", (32,32) >>>\n";
+
+    uint3 dim = devData.allocResolution.max - devData.allocResolution.min;
+    
+    fillHashMap<Node>
+        <<< blocks, threadsPerBlock >>>( nodes_gpu, 
+                                         devData.hashMap,
+                                         dim );
+
+    checkCudaErrors( "populateHashMap" );
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1676,7 +1761,12 @@ __global__ void constructNodeList2
 
         nodeIdx = res.x * res.y * z + res.x * y + VOX_BPI * x + bit;
 
-        nodes[nodeIdx] = node;
+        if ( Node::usesTwoArrays() )
+        {
+            if ( node.bid() != 0 ) nodes[nodeIdx] = node;
+        }
+        else
+            nodes[nodeIdx] = node;
     }
 }
 ///////////////////////////////////////////////////////////////////////////////
@@ -1787,20 +1877,18 @@ __global__ void convertToFCCGrid
 /// supports the division of space into multiple \a subspaces to lessen the 
 /// computational burden caused by one invocation of the kernel. 
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node>
+template <class Node, class SNode>
 __global__ void fillNodeList2
     ( 
     Node * nodes,             ///< [in,out] Array of Nodes.
     Bounds<uint3> resolution, ///< [in] Total bounds of this device's space.
     Bounds<uint2> yzSubSpace, ///< [in] Bounds of the subspace.
-    bool * error              /**< [out] Boolean that signals the need to run 
+    bool * error,             /**< [out] Boolean that signals the need to run 
                                    the kernel again. */
+    HashMap hashMap,
+    SNode * surfNodes
     )
 {
-    uint nrOfNodes, x, y, z;
-    uchar permutation, newBid;
-    Node node;
-
     uint3 res = resolution.max - resolution.min;
     uint npx = res.x;
     uint npy = npx * res.y;
@@ -1821,29 +1909,29 @@ __global__ void fillNodeList2
 
     __syncthreads();
 
-    nrOfNodes = npy * res.z;
+    uint nrOfNodes = npy * res.z;
     for ( uint n = startNode + blockIdx.x * blockDim.x + threadIdx.x; 
           n < nrOfNodes && n < endNode; 
           n += gridDim.x * blockDim.x )
     {
-        node = nodes[n];
+        Node node = nodes[n];
 
         // Don't process nodes that are non-solid.
         if (node.bid() == 0)
             continue;
 
-        y = (n % npy) / npx;
+        uint y = (n % npy) / npx;
 
         if ( y < space.min.x || y >= space.max.x )
             continue;
 
-        x = n % npx;
-        z = n / npy;
+        uint x = n % npx;
+        uint z = n / npy;
 
         if ( z < space.min.y || z >= space.max.y )
             continue;
 
-        permutation = 0;
+        uchar permutation = 0;
 
         if (x > 0)
         {
@@ -1899,13 +1987,24 @@ __global__ void fillNodeList2
             }
         }
 
-        newBid = orientationLookup[permutation];
+        uchar newBid = orientationLookup[permutation];
 
         node.bid(newBid);
         
         if (newBid == 0)
         {
             *error = true;
+        }
+
+        if ( Node::usesTwoArrays() )
+        {
+            uint surfNodeIdx = hashMap.get( n );
+            if ( surfNodeIdx != UINT32_MAX )
+            {
+                SNode surfNode = surfNodes[surfNodeIdx];
+                surfNode.orientation = newBid;
+                surfNodes[surfNodeIdx] = surfNode;
+            }
         }
 
         nodes[n] = node;
@@ -2289,6 +2388,9 @@ __global__ void SimpleSurfaceVoxelizer
     Bounds<uint3> voxBB;
     OverlapData data[3];
 
+    HashMap hm; // Hashmap needs to be passed to processVoxel even though it 
+                // is not used there.
+
     // Loop until there are no more triangles to process.
     for( uint triangleIdx = blockDim.x * blockIdx.x + threadIdx.x
        ; triangleIdx < nrOfTriangles
@@ -2344,11 +2446,13 @@ __global__ void SimpleSurfaceVoxelizer
                                         , triNormal
                                         , modelBBMin
                                         , voxelLength
-                                        , i
-                                        , j
-                                        , k
+                                        , make_int3( i, j, k )
+                                        , make_int3( 0, 0, 0 )
                                         , 1
-                                        , resolution );
+                                        , resolution
+                                        , false
+                                        , hm
+                                        , (SurfaceNode*)0 );
                     }
                 }
             }
@@ -2943,7 +3047,7 @@ inline __host__ __device__
 ///////////////////////////////////////////////////////////////////////////////
 /// ???
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node>
+template <class Node, class SNode>
 inline __device__ void processVoxel
     ( Node * nodes            ///< [out] Node array.
     , uchar const * materials ///< [in] Material to triangle mapping.
@@ -2953,14 +3057,20 @@ inline __device__ void processVoxel
     , float3 modelBBMin       /**< [in] Minimum corner of the device's voxel 
                                         space. */
     , float voxelLength       ///< [in] Distance between voxel centers.
-    , int x                   ///< [in] X coordinate of the voxel.
-    , int y                   ///< [in] Y coordinate of the voxel.
-    , int z                   ///< [in] Z coordinate of the voxel.
+    , int3 coords
+    , int3 adjs
     , int gridType            ///< [in] How the grid is shifted - 1 for normal.
     , uint3 resolution        ///< [in] Dimensions of the device's voxel space.
+    , bool countVoxels
+    , HashMap & hashMap
+    , SNode * surfNodes
     )
 {
     uint nodeIdx = 0;
+
+    const uint x = coords.x + adjs.x;
+    const uint y = coords.y + adjs.y;
+    const uint z = coords.z + adjs.z;
 
     if ( Node::isFCCNode() )
     {   // The node is to be written into a FCC grid.
@@ -2968,69 +3078,147 @@ inline __device__ void processVoxel
         const uint a = l * resolution.y;
         
         if ( gridType == 1 )
-            nodeIdx = a * 2*uint(z) + l * uint(y) + 2*uint(x);
+            nodeIdx = a * 2*z + l * y + 2*x;
         else if ( gridType == 2 )
-            nodeIdx = a * 2*uint(z) + l * uint(y) + 2*uint(x) + 1;
+            nodeIdx = a * 2*z + l * y + 2*x + 1;
         else if ( gridType == 3 )
-            nodeIdx = a * (2*uint(z) + 1) + l * uint(y) + 2*uint(x);
+            nodeIdx = a * (2*z + 1) + l * y + 2*x;
         else if ( gridType == 4 )
-            nodeIdx = a * (2*uint(z) + 1) + l * uint(y) + 2*uint(x) + 1;
+            nodeIdx = a * (2*z + 1) + l * y + 2*x + 1;
     }
     else
     {   // The node is to be written into a normal grid.
+
         const uint l = resolution.x;
         const uint a = l * resolution.y;
 
-        nodeIdx = a * uint(z) + l * uint(y) + uint(x);
+        nodeIdx = a*z + l*y + x;
+    }
+
+    if ( countVoxels )
+    {
+        nodes[nodeIdx] = Node( 1 );
+        return;
+    }
+
+    if ( Node::hasRatio() )
+    {
+        if ( Node::usesTwoArrays() )
+        {
+            SNode n;
+            float a0, a1, a2, a3, a4, a5, a6;
+            float volume = 
+                calculateCutVolumeAndAreas( triangle
+                                          , make_int3( coords.x
+                                                     , coords.y
+                                                     , coords.z )
+                                          , triNormal
+                                          , modelBBMin
+                                          , voxelLength
+                                          , a0
+                                          , a1
+                                          , a2
+                                          , a3
+                                          , a4
+                                          , a5
+                                          , a6 );
+
+            n.volume = volume;
+
+            n.cutNormal = triNormal;
+            n.cutArea = abs(a0);
+
+            n.xPosArea = abs(a1);
+            n.xNegArea = abs(a6);
+
+            if ( a6 < 0.0f )
+            {
+                n.xPosArea = abs(a6);
+                n.xNegArea = abs(a1);
+            }
+
+            bool x = triNormal.x >= 0.0f;
+            bool y = triNormal.y >= 0.0f;
+            bool z = triNormal.z >= 0.0f;
+
+            if ( (x + y + z) % 2 == 1 )
+            {   // Don't swap y and z.
+                n.yPosArea = abs(a2);
+                n.yNegArea = abs(a5);
+
+                if ( a5 < 0.0f )
+                {
+                    n.yPosArea = abs(a5);
+                    n.yNegArea = abs(a2);
+                }
+
+                n.zPosArea = abs(a3);
+                n.zNegArea = abs(a4);
+
+                if ( a4 <= 0.0f )
+                {
+                    n.zPosArea = abs(a4);
+                    n.zNegArea = abs(a3);
+                }
+            }
+            else
+            {   // Swap y and z.
+                n.yPosArea = abs(a3);
+                n.yNegArea = abs(a4);
+
+                if ( a4 < 0.0f )
+                {
+                    n.yPosArea = abs(a4);
+                    n.yNegArea = abs(a3);
+                }
+
+                n.zPosArea = abs(a2);
+                n.zNegArea = abs(a5);
+
+                if ( a5 < 0.0f )
+                {
+                    n.zPosArea = abs(a5);
+                    n.zNegArea = abs(a2);
+                }
+            }
+
+            n.material = materials[triangleIdx];
+
+            uint surfNodeIdx = hashMap.get( nodeIdx );
+
+            if ( surfNodeIdx != UINT32_MAX )
+            {
+                surfNodes[surfNodeIdx] = n;
+                //nodes[nodeIdx] = Node( 1 );
+            }
+        }
+        else
+        {
+            float volume, volRatio;
+
+            // Calculate the fractional volume of the cut voxel.
+            volume = calculateVoxelPlaneIntersectionVolume( 
+                triangle, 
+                make_int3( coords.x, coords.y, coords.z ), 
+                triNormal, 
+                modelBBMin, 
+                voxelLength );
+
+            // The volume ratio we need is the other side of the cut voxel.
+            volRatio = 
+                1.0f - volume / (voxelLength * voxelLength * voxelLength);
+
+            // Put the node into memory.
+            nodes[nodeIdx] = 
+                Node( 1, materials[triangleIdx], abs( volRatio ) );
+        }
+        return;
     }
 
     // Make the node solid and set its material.
     nodes[nodeIdx] = Node( 1, materials[triangleIdx] );
 }
-///////////////////////////////////////////////////////////////////////////////
-/// Writes the voxel to memory once an overlap has been confirmed. A 
-/// specialized version for the \p PartialNode. It performs the calculations to 
-/// determine the fraction of the \p Node that is solid before writing the node 
-/// to memory.
-///////////////////////////////////////////////////////////////////////////////
-template <>
-inline __device__ void processVoxel<PartialNode>
-    ( PartialNode * nodes     ///< [out] Array of PartialNodes.
-    , uchar const * materials ///< [in] Material to triangle mapping.
-    , uint triangleIdx        ///< [in] Current triangle index.
-    , float3 * triangle       ///< [in] Triangle vertices.
-    , float3 triNormal        ///< [in] Triangle normal.
-    , float3 modelBBMin       ///< [in] \brief Minimum corner of the device's 
-                              ///<             voxel space.
-                              ///<
-    , float voxelLength       ///< [in] Distance between voxel centers.
-    , int x                   ///< [in] X coordinate of the voxel.
-    , int y                   ///< [in] Y coordinate of the voxel.
-    , int z                   ///< [in] Z coordinate of the voxel.
-    , int gridType            ///< [in] How the grid is shifted - 1 for normal.
-    , uint3 resolution        ///< [in] Dimensions of the device's voxel space.
-    )
-{
-    uint nodeIdx;
-    float volume, volRatio;
 
-    // Calculate node index from the coordinates.
-    nodeIdx = resolution.x * resolution.y * uint(z) + 
-              resolution.x * uint(y) + uint(x);
-
-    // Calculate the fractional volume of the cut voxel.
-    volume = calculateVoxelPlaneIntersectionVolume( triangle
-                                                  , make_int3( x, y, z )
-                                                  , triNormal
-                                                  , modelBBMin
-                                                  , voxelLength );
-
-    // The volume ratio we need is the other side of the cut voxel.
-    volRatio = 1.0f - volume / (voxelLength * voxelLength * voxelLength);
-
-    // Put the node into memory.
-    nodes[nodeIdx] = PartialNode( 1, materials[triangleIdx], abs( volRatio ) );
-}
 ///////////////////////////////////////////////////////////////////////////////
 /// Kernel that processes each triangle of the model and produces a 
 /// classification for each one. The classification is then meant to be sorted 
@@ -3303,29 +3491,34 @@ inline __host__ __device__
 /// of voxel(s). Because of this, the triangle has to intersect with all of the 
 /// voxels in its bounding box. No overlap tests need to be performed.
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node>
+template <class Node, class SNode>
 __global__ void process1DTriangles
-    ( float const * vertices        ///< [in] Vertices of the model.
-    , uint const * indices          ///< [in] Indices of the model.
-    , uint const * triTypes         ///< [in] Triangle classifications.
-    , uint const * triangles        /**< [in] Classification to triangle 
-                                              mapping. */
-    , uchar const * materials       ///< [in] Triangle to material mapping.
-    , Node * nodes                  ///< [out] Array of nodes.
-    , uint triStartIndex            /**< [in] Starting index for this triangle 
-                                              type. */
-    , uint triEndIndex              ///< [in] End index for this triangle type.
-    , bool left                     ///< [in] Other device on the left?
-    , bool right                    ///< [in] Other device on the right?
-    , bool up                       ///< [in] Other device above?
-    , bool down                     ///< [in] Other device below?
-    , float3 modelBBMin             /**< [in] Minimum corner of the device's 
-                                              voxelization space. */
-    , float	voxelLength             ///< [in] Distance between voxel centers.
-    , Bounds<uint3> totalResolution /**< [in] Bounding box of the device's 
-                                              voxelization space. */
-    , Bounds<uint3> subSpace        ///< [in] Bounding box of the subspace.
-    , int gridType                  ///< [in] Which of the four grids to use.
+    ( float const * vertices  ///< [in] Vertices of the model.
+    , uint const * indices    ///< [in] Indices of the model.
+    , uint const * triTypes   ///< [in] Triangle classifications.
+    , uint const * triangles  ///< [in] Classification to triangle mapping.
+    , uchar const * materials ///< [in] Triangle to material mapping.
+    , Node * nodes            ///< [out] Array of nodes.
+    , uint triStartIndex      ///< [in] Starting index for this triangle type.
+    , uint triEndIndex        ///< [in] End index for this triangle type.
+    , bool left               ///< [in] Other device on the left?
+    , bool right              ///< [in] Other device on the right?
+    , bool up                 ///< [in] Other device above?
+    , bool down               ///< [in] Other device below?
+    , float3 modelBBMin       ///< [in] Minimum corner of the device's 
+                              ///<      voxelization space.
+                              ///<
+    , float	voxelLength       ///< [in] Distance between voxel centers.
+    , Bounds<uint3> totalResolution ///< [in] Bounding box of the device's 
+                                    ///<      voxelization space.
+                                    ///<
+    , Bounds<uint3> subSpace  ///< [in] Bounding box of the subspace.
+    , int gridType            ///< [in] Which of the four grids to use.
+    , bool countVoxels        ///< [in] \p true to forego the normal 
+                              ///<      voxelization and instead calculate the 
+                              ///<      number of overlaps per voxel.
+    , HashMap hashMap
+    , SNode * surfNodes
     )
 {
     float3 triangle[3];
@@ -3374,38 +3567,79 @@ __global__ void process1DTriangles
         int3 const adjustment = { 1,
                                   left ? 0 : 1,
                                   down ? 0 : 1 };
-        voxBB.min += adjustment;
-        voxBB.max += adjustment;
+        //voxBB.min += adjustment;
+        //voxBB.max += adjustment;
 
         uint3 res = totalResolution.max - totalResolution.min;
 
         res.y += adjustment.y + (right ? 0 : 1);
         res.z += adjustment.z + (up ? 0 : 1);
 
+        float3 triNormal = 
+            Node::hasRatio() ? cross( triangle[0] - triangle[2]
+                                    , triangle[1] - triangle[0] )
+                             : make_float3( 0.0f );
+
         // Process the voxels.
         if (domAxis == xAxis)
         {
             for ( int i = voxBB.min.x; i <= voxBB.max.x; i++ )
-                processVoxel( nodes,       materials,         triIdx,      
-                              triangle,    make_float3(0.0f), modelBBMin, 
-                              voxelLength, i,                 voxBB.min.y, 
-                              voxBB.min.z, gridType,          res );
+            {
+                processVoxel( nodes
+                            , materials
+                            , triIdx
+                            , triangle
+                            , triNormal
+                            , modelBBMin
+                            , voxelLength
+                            , make_int3( i, voxBB.min.y, voxBB.min.z )
+                            , adjustment
+                            , gridType
+                            , res
+                            , countVoxels
+                            , hashMap
+                            , surfNodes );
+            }
         }
         else if (domAxis == yAxis)
         {
             for ( int j = voxBB.min.y; j <= voxBB.max.y; j++ )
-                processVoxel( nodes,       materials,         triIdx, 
-                              triangle,    make_float3(0.0f), modelBBMin, 
-                              voxelLength, voxBB.min.x,       j, 
-                              voxBB.min.z, gridType,          res );
+            {
+                processVoxel( nodes
+                            , materials
+                            , triIdx
+                            , triangle
+                            , make_float3(0.0f)
+                            , modelBBMin
+                            , voxelLength
+                            , make_int3( voxBB.min.x, j, voxBB.min.z )
+                            , adjustment
+                            , gridType
+                            , res
+                            , countVoxels
+                            , hashMap
+                            , surfNodes );
+            }
         }
         else
         {
             for ( int k = voxBB.min.z; k <= voxBB.max.z; k++ )
-                processVoxel( nodes,       materials,         triIdx, 
-                              triangle,    make_float3(0.0f), modelBBMin, 
-                              voxelLength, voxBB.min.x,       voxBB.min.y, 
-                              k,           gridType,          res );
+            {
+                processVoxel( nodes
+                            , materials
+                            , triIdx
+                            , triangle
+                            , make_float3(0.0f)
+                            , modelBBMin
+                            , voxelLength
+                            , make_int3( voxBB.min.x, voxBB.min.y, k )
+                            , adjustment
+                            , gridType
+                            , res
+                            , countVoxels
+                            , hashMap
+                            , surfNodes );
+            }
         }
     }
 }
@@ -3415,7 +3649,7 @@ __global__ void process1DTriangles
 /// side is at most one voxel thick. This means that the triangle only needs to 
 /// be tested for overlap along its dominant axis.
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node>
+template <class Node, class SNode>
 __global__ void process2DTriangles
     ( float const * vertices        ///< [in] Vertices of the model.
     , uint const * indices          ///< [in] Indices of the model.
@@ -3438,6 +3672,9 @@ __global__ void process2DTriangles
                                               voxelization space. */
     , Bounds<uint3> subSpace        ///< [in] Bounding box of the subspace.
     , int gridType                  ///< [in] Which of the four grids to use.
+    , bool countVoxels
+    , HashMap hashMap
+    , SNode * surfNodes
     )
 {
     float3 triangle[3], triNormal, p;
@@ -3513,18 +3750,22 @@ __global__ void process2DTriangles
                                                            modelBBMin.z, 
                                                            voxelLength ) );
                     if ( overlapTestYZ( data, p ) )
-                        processVoxel( nodes, 
-                                      materials, 
-                                      triIdx, 
-                                      triangle, 
-                                      triNormal,
-                                      modelBBMin, 
-                                      voxelLength, 
-                                      voxBB.min.x + adjs.x, 
-                                      j + adjs.y, 
-                                      k + adjs.z,
-                                      gridType,
-                                      res );
+                    {
+                        processVoxel( nodes
+                                    , materials
+                                    , triIdx
+                                    , triangle
+                                    , triNormal
+                                    , modelBBMin
+                                    , voxelLength
+                                    , make_int3( voxBB.min.x, j, k )
+                                    , adjs
+                                    , gridType
+                                    , res
+                                    , countVoxels
+                                    , hashMap
+                                    , surfNodes );
+                    }
                 }
             }
         }
@@ -3545,18 +3786,22 @@ __global__ void process2DTriangles
                                                        modelBBMin.z, 
                                                        voxelLength ) );
                     if ( overlapTestZX( data, p ) )
-                        processVoxel( nodes, 
-                                      materials,
-                                      triIdx,
-                                      triangle,  
-                                      triNormal, 
-                                      modelBBMin, 
-                                      voxelLength, 
-                                      i + adjs.x, 
-                                      voxBB.min.y + adjs.y,
-                                      k + adjs.z, 
-                                      gridType,
-                                      res );
+                    {
+                        processVoxel( nodes
+                                    , materials
+                                    , triIdx
+                                    , triangle
+                                    , triNormal
+                                    , modelBBMin
+                                    , voxelLength
+                                    , make_int3( i, voxBB.min.y, k )
+                                    , adjs
+                                    , gridType
+                                    , res
+                                    , countVoxels
+                                    , hashMap
+                                    , surfNodes );
+                    }
                 }
             }
         }
@@ -3577,18 +3822,22 @@ __global__ void process2DTriangles
                                                        voxelLength ),
                         0.0f );
                     if ( overlapTestXY( data, p ) )
-                        processVoxel( nodes, 
-                                      materials, 
-                                      triIdx, 
-                                      triangle, 
-                                      triNormal, 
-                                      modelBBMin, 
-                                      voxelLength, 
-                                      i + adjs.x, 
-                                      j + adjs.y, 
-                                      voxBB.min.z + adjs.z, 
-                                      gridType,
-                                      res );
+                    {
+                        processVoxel( nodes
+                                    , materials
+                                    , triIdx
+                                    , triangle
+                                    , triNormal
+                                    , modelBBMin
+                                    , voxelLength
+                                    , make_int3( i, j, voxBB.min.z )
+                                    , adjs
+                                    , gridType
+                                    , res
+                                    , countVoxels
+                                    , hashMap
+                                    , surfNodes );
+                    }
                 }
             }
         }
@@ -3600,7 +3849,7 @@ __global__ void process2DTriangles
 /// all directions. In order to determine overlap, three overlap tests need to 
 /// be performed -- one along each main axis.
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node>
+template <class Node, class SNode>
 __global__ void process3DTriangles
     ( float const * vertices        ///< [in] Vertices of the model.
     , uint const * indices          ///< [in] Indices of the model.
@@ -3623,6 +3872,9 @@ __global__ void process3DTriangles
                                               voxelization space. */
     , Bounds<uint3> subSpace        ///< [in] Bounding box of the subspace.
     , int gridType                  ///< [in] Which of the four grids to use.
+    , bool countVoxels
+    , HashMap hashMap
+    , SNode * surfNodes
     )
 {
     float3 triangle[3], triNormal, p;
@@ -3728,18 +3980,22 @@ __global__ void process3DTriangles
                         // No need to perform overlap tests if the range is 
                         // only one voxel thick.
                         if ( voxRange.x == voxRange.y )
-                            processVoxel( nodes, 
-                                          materials, 
-                                          triIdx, 
-                                          triangle, 
-                                          triNormal, 
-                                          modelBBMin, 
-                                          voxelLength, 
-                                          voxRange.x + adjs.x, 
-                                          j + adjs.y, 
-                                          k + adjs.z, 
-                                          gridType,
-                                          res );
+                        {
+                            processVoxel( nodes
+                                        , materials
+                                        , triIdx
+                                        , triangle
+                                        , triNormal
+                                        , modelBBMin
+                                        , voxelLength
+                                        , make_int3( voxRange.x, j, k )
+                                        , adjs
+                                        , gridType
+                                        , res
+                                        , countVoxels
+                                        , hashMap
+                                        , surfNodes );
+                        }
                         else
                         {
                             // Perform remaining overlap tests on max 3 voxels.
@@ -3754,19 +4010,20 @@ __global__ void process3DTriangles
                                 {
                                     if ( overlapTestXY( data[2], p ) )
                                     {
-                                        // Process the voxel.
-                                        processVoxel( nodes, 
-                                                      materials, 
-                                                      triIdx, 
-                                                      triangle, 
-                                                      triNormal, 
-                                                      modelBBMin, 
-                                                      voxelLength, 
-                                                      i + adjs.x, 
-                                                      j + adjs.y, 
-                                                      k + adjs.z, 
-                                                      gridType,
-                                                      res );
+                                        processVoxel( nodes
+                                                    , materials
+                                                    , triIdx
+                                                    , triangle
+                                                    , triNormal
+                                                    , modelBBMin
+                                                    , voxelLength
+                                                    , make_int3( i, j, k )
+                                                    , adjs
+                                                    , gridType
+                                                    , res
+                                                    , countVoxels
+                                                    , hashMap
+                                                    , surfNodes );
                                     }
                                 }
                             }
@@ -3815,18 +4072,22 @@ __global__ void process3DTriangles
                         // No need to perform overlap tests if the range is 
                         // only one voxel thick.
                         if (voxRange.x == voxRange.y)
-                            processVoxel( nodes, 
-                                          materials, 
-                                          triIdx, 
-                                          triangle, 
-                                          triNormal, 
-                                          modelBBMin, 
-                                          voxelLength, 
-                                          i + adjs.x, 
-                                          voxRange.x + adjs.y, 
-                                          k + adjs.z, 
-                                          gridType,
-                                          res );
+                        {
+                            processVoxel( nodes
+                                        , materials
+                                        , triIdx
+                                        , triangle
+                                        , triNormal
+                                        , modelBBMin
+                                        , voxelLength
+                                        , make_int3( i, voxRange.x, k )
+                                        , adjs
+                                        , gridType
+                                        , res
+                                        , countVoxels
+                                        , hashMap
+                                        , surfNodes );
+                        }
                         else
                         {
                             // Perform remaining overlap tests on max 3 voxels.
@@ -3841,19 +4102,20 @@ __global__ void process3DTriangles
                                 {
                                     if ( overlapTestYZ( data[0], p ) )
                                     {
-                                        // Process the voxel.
-                                        processVoxel( nodes, 
-                                                      materials, 
-                                                      triIdx, 
-                                                      triangle, 
-                                                      triNormal, 
-                                                      modelBBMin, 
-                                                      voxelLength, 
-                                                      i + adjs.x, 
-                                                      j + adjs.y, 
-                                                      k + adjs.z, 
-                                                      gridType,
-                                                      res );
+                                        processVoxel( nodes
+                                                    , materials
+                                                    , triIdx
+                                                    , triangle
+                                                    , triNormal
+                                                    , modelBBMin
+                                                    , voxelLength
+                                                    , make_int3( i, j, k )
+                                                    , adjs
+                                                    , gridType
+                                                    , res
+                                                    , countVoxels
+                                                    , hashMap
+                                                    , surfNodes );
                                     }
                                 }
                             }
@@ -3904,18 +4166,22 @@ __global__ void process3DTriangles
                         /* No need to perform overlap tests if the range is 
                            only one voxel thick. */
                         if (voxRange.x == voxRange.y)
-                            processVoxel( nodes, 
-                                          materials, 
-                                          triIdx, 
-                                          triangle, 
-                                          triNormal, 
-                                          modelBBMin, 
-                                          voxelLength, 
-                                          i + adjs.x, 
-                                          j + adjs.y, 
-                                          voxRange.x + adjs.z, 
-                                          gridType,
-                                          res );
+                        {
+                            processVoxel( nodes
+                                        , materials
+                                        , triIdx
+                                        , triangle
+                                        , triNormal
+                                        , modelBBMin
+                                        , voxelLength
+                                        , make_int3( i, j, voxRange.x )
+                                        , adjs
+                                        , gridType
+                                        , res
+                                        , countVoxels
+                                        , hashMap
+                                        , surfNodes );
+                        }
                         else
                         {
                             // Perform remaining overlap tests on max 3 voxels.
@@ -3930,19 +4196,20 @@ __global__ void process3DTriangles
                                 {
                                     if ( overlapTestZX( data[1], p ) )
                                     {
-                                        // Process the voxel.
-                                        processVoxel( nodes, 
-                                                      materials, 
-                                                      triIdx, 
-                                                      triangle, 
-                                                      triNormal, 
-                                                      modelBBMin, 
-                                                      voxelLength, 
-                                                      i + adjs.x, 
-                                                      j + adjs.y, 
-                                                      k + adjs.z, 
-                                                      gridType,
-                                                      res );
+                                        processVoxel( nodes
+                                                    , materials
+                                                    , triIdx
+                                                    , triangle
+                                                    , triNormal
+                                                    , modelBBMin
+                                                    , voxelLength
+                                                    , make_int3( i, j, k )
+                                                    , adjs
+                                                    , gridType
+                                                    , res
+                                                    , countVoxels
+                                                    , hashMap
+                                                    , surfNodes );
                                     }
                                 }
                             }
@@ -4842,6 +5109,812 @@ __global__ void zeroPadding
         }
     }
 }
+
+__device__ float calculateCutVolumeAndAreas
+    ( float3 * triangle
+    , int3 voxel
+    , float3 triNormal
+    , float3 modelBBMin
+    , float d
+    , float & ipArea
+    , float & f1Area
+    , float & f2Area
+    , float & f3Area
+    , float & f4Area
+    , float & f5Area
+    , float & f6Area
+    )
+{
+    // Voxel center.
+    float3 vc = modelBBMin + d * make_float3( float( voxel.x )
+                                            , float( voxel.y )
+                                            , float( voxel.z ) );
+
+    // Signs of the normal's component vectors. Used to determine the vertex 
+    // closest to the triangle / plane and also to ensure that the volume 
+    // is the solid volume and not the non-solid one. A triangle's normals 
+    // point away from the inside of the object.
+
+    bool x, y, z;               // Sign of triangle normal components.
+    x = -triNormal.x > 0.0f;
+    y = -triNormal.y > 0.0f;
+    z = -triNormal.z > 0.0f;
+
+    float3 dx, dy, dz;
+
+    // Component vectors that form a right-handed system.
+    if ((x + y + z) % 2 == 0)
+    {
+        dx = make_float3(!x * d + x * -d, 0.0f, 0.0f);
+        dy = make_float3(0.0f, !y * d + y * -d, 0.0f);
+        dz = make_float3(0.0f, 0.0f, !z * d + z * -d);
+    }
+    else
+    {
+        dx = make_float3(!x * d + x * -d, 0.0f, 0.0f);
+        dz = make_float3(0.0f, !y * d + y * -d, 0.0f);
+        dy = make_float3(0.0f, 0.0f, !z * d + z * -d);
+    }
+
+    float dh = d / 2.0f; // Half of distance between voxel centers.
+
+    float3 vertices[14];
+    char indices[48] = {0};
+
+    // Corner points of the voxel. Index 0 ends up being the closest to the 
+    // plane, and index 7 the furthest.
+    vertices[0] = vc + make_float3( dh * x - dh * !x
+                                  , dh * y - dh * !y
+                                  , dh * z - dh * !z );
+    vertices[1] = vertices[0] + dx;
+    vertices[2] = vertices[0] + dy;
+    vertices[3] = vertices[0] + dz;
+    vertices[4] = vertices[1] + dz;
+    vertices[5] = vertices[2] + dx;
+    vertices[6] = vertices[3] + dy;
+    vertices[7] = vertices[4] + dy;
+
+    // Calculates the intersection points between the triangle and the voxel 
+    // and constructs the faces that make up the irregular polyhedron that 
+    // represents the volume behind the plane.
+    char nrOfIntersectionPoints = 0,
+                nrOfFace1Points = 0,
+                nrOfFace2Points = 0,
+                nrOfFace3Points = 0,
+                nrOfFace4Points = 0,
+                nrOfFace5Points = 0,
+                nrOfFace6Points = 0;
+    constructAllPolyhedronFaces( vertices
+                               , indices
+                               , nrOfIntersectionPoints
+                               , nrOfFace1Points
+                               , nrOfFace2Points
+                               , nrOfFace3Points
+                               , nrOfFace4Points
+                               , nrOfFace5Points
+                               , nrOfFace6Points
+                               , triangle
+                               , -triNormal );
+
+    if ( nrOfIntersectionPoints == 0 )
+    {
+        float dist = dot( triNormal, vertices[0] - triangle[0] );
+
+        bool v = dist <= 0.0f;
+
+        float maxArea = d * d;
+
+        ipArea = 0.0f;
+        f1Area = v ? maxArea : 0.0f;
+        f2Area = v ? maxArea : 0.0f;
+        f3Area = v ? maxArea : 0.0f;
+        f4Area = v ? maxArea : 0.0f;
+        f5Area = v ? maxArea : 0.0f;
+        f6Area = v ? maxArea : 0.0f;
+
+        return v ? maxArea * d : 0.0f;
+    }
+
+    // Calculate area of face 4.
+    float3 base[8];
+    float3 height;
+    if (nrOfFace4Points > 2)
+    {
+        for ( int i = 0; i < nrOfFace4Points; ++i )
+        {
+            float3 v = vertices[indices[8*3+i]];
+
+            base[i].x = dz.x != 0.0f ? -v.z : v.x;
+            base[i].y = dz.y != 0.0f ? -v.z : v.y;
+
+            base[i].z = 0.0f;
+            base[i].z += dz.x != 0.0f ? v.x : 0.0f;
+            base[i].z += dz.y != 0.0f ? v.y : 0.0f;
+            base[i].z += dz.z != 0.0f ? v.z : 0.0f;
+        }
+
+        height.x = dz.x != 0.0f ? -vertices[0].z : vertices[0].x;
+        height.y = dz.y != 0.0f ? -vertices[0].z : vertices[0].y;
+
+        height.z = 0.0f;
+        height.z += dz.x != 0.0f ? vertices[0].x : 0.0f;
+        height.z += dz.y != 0.0f ? vertices[0].y : 0.0f;
+        height.z += dz.z != 0.0f ? vertices[0].z : 0.0f;
+
+        f4Area = polygonArea( base, nrOfFace4Points );
+    }
+
+    // Calculate area of face 5.
+    if (nrOfFace5Points > 2)
+    {
+        for ( int i = 0; i < nrOfFace5Points; ++i )
+        {
+            float3 v = vertices[indices[8*4+i]];
+
+            base[i].x = dy.x != 0.0f ? -v.z : v.x;
+            base[i].y = dy.y != 0.0f ? -v.z : v.y;
+
+            base[i].z = 0.0f;
+            base[i].z += dy.x != 0.0f ? v.x : 0.0f;
+            base[i].z += dy.y != 0.0f ? v.y : 0.0f;
+            base[i].z += dy.z != 0.0f ? v.z : 0.0f;
+        }
+
+        height.x = dy.x != 0.0f ? -vertices[0].z : vertices[0].x;
+        height.y = dy.y != 0.0f ? -vertices[0].z : vertices[0].y;
+
+        height.z = 0.0f;
+        height.z += dy.x != 0.0f ? vertices[0].x : 0.0f;
+        height.z += dy.y != 0.0f ? vertices[0].y : 0.0f;
+        height.z += dy.z != 0.0f ? vertices[0].z : 0.0f;
+
+        f5Area = polygonArea( base, nrOfFace5Points );
+    }
+
+    // Calculate area of face 6.
+    if (nrOfFace6Points > 2)
+    {
+        for ( int i = 0; i < nrOfFace6Points; ++i )
+        {
+            float3 v = vertices[indices[8*5+i]];
+
+            base[i].x = dx.x != 0.0f ? -v.z : v.x;
+            base[i].y = dx.y != 0.0f ? -v.z : v.y;
+
+            base[i].z = 0.0f;
+            base[i].z += dx.x != 0.0f ? v.x : 0.0f;
+            base[i].z += dx.y != 0.0f ? v.y : 0.0f;
+            base[i].z += dx.z != 0.0f ? v.z : 0.0f;
+        }
+
+        height.x = dx.x != 0.0f ? -vertices[0].z : vertices[0].x;
+        height.y = dx.y != 0.0f ? -vertices[0].z : vertices[0].y;
+
+        height.z = 0.0f;
+        height.z += dx.x != 0.0f ? vertices[0].x : 0.0f;
+        height.z += dx.y != 0.0f ? vertices[0].y : 0.0f;
+        height.z += dx.z != 0.0f ? vertices[0].z : 0.0f;
+
+        f6Area = polygonArea( base, nrOfFace6Points );
+    }
+
+    
+    // Calculate the volume of the irregular polyhedron.
+    return polyhedronVolume( vertices
+                             , indices
+                             , nrOfIntersectionPoints
+                             , nrOfFace1Points
+                             , nrOfFace2Points
+                             , nrOfFace3Points
+                             , -triNormal
+                             , dx
+                             , dy
+                             , dz
+                             , ipArea
+                             , f1Area
+                             , f2Area
+                             , f3Area );
+}
+
+__device__ void constructAllPolyhedronFaces
+    ( float3 * vertices
+    , char      * indices
+    , char      & nrOfIPts  ///< [out] Number of intersection points.
+    , char      & nrF1      ///< [out] Number of vertices in face 1.
+    , char      & nrF2      ///< [out] Number of vertices in face 2.
+    , char      & nrF3      ///< [out] Number of vertices in face 3.
+    , char      & nrF4      ///< [out] Number of vertices in face 4.
+    , char      & nrF5      ///< [out] Number of vertices in face 5.
+    , char      & nrF6      ///< [out] Number of vertices in face 6.
+    , float3 * triangle  ///< [in] Vertices of the triangle.
+    , float3   triNormal ///< [in] Triangle normal.
+    )
+{
+    float t; // Intersection point along an edge.
+
+    nrOfIPts = 0;
+    nrF1 = 0;
+    nrF2 = 0;
+    nrF3 = 0;
+    nrF4 = 0;
+    nrF5 = 0;
+    nrF6 = 0;
+
+    indices[ 8*3 + nrF4 ] = 0;
+    nrF4++;
+    indices[ 8*5 + nrF6 ] = 0;
+    nrF6++;
+
+    // Path 1: v0 -> v1.
+    t = dot( triNormal, triangle[0] - vertices[0] ) / 
+        dot( triNormal, vertices[1] - vertices[0] );
+    t = isfinite(t) ? t : -1.0f;
+    if (t < 0.0f || t > 1.0f) // No intersection.
+    {
+        indices[ nrF1 ] = 1;
+        nrF1++;
+        indices[ 8*3 + nrF4 ] = 1;
+        nrF4++;
+
+        // Path 1: v1 -> v4
+        t = dot( triNormal, triangle[0] - vertices[1] ) / 
+            dot( triNormal, vertices[4] - vertices[1] );
+        t = isfinite(t) ? t : -1.0f;
+        if (t < 0.0f || t > 1.0f) // No intersection.
+        {
+            indices[ nrF1 ] = 4;
+            nrF1++;
+            indices[ 8*4 + nrF5 ] = 4;
+            nrF5++;
+            indices[ 8*4 + nrF5 ] = 1;
+            nrF5++;
+
+            // Path 1: v4 -> v7
+            t = dot( triNormal, triangle[0] - vertices[4] ) / 
+                dot( triNormal, vertices[7] - vertices[4] );
+            t = isfinite(t) ? t : -1.0f;
+            if (t < 0.0f || t > 1.0f) // No intersection.
+            {
+                /*
+                indices[ nrF1 ] = 7;
+                nrF1++;
+                indices[ 8*1 + nrF2 ] = 7;
+                nrF2++;
+                indices[ 8*2 + nrF3 ] = 7;
+                nrF3++;
+                indices[ 8*2 + nrF3 ] = 4;
+                nrF3++;
+                */
+
+                nrOfIPts = 0;
+                return;
+            }
+            else // Intersection in path 1, v4 -> v7.
+            {
+                vertices[ 8 + nrOfIPts ] = vertices[4] + t * (vertices[7] - vertices[4]);
+
+                indices[ nrF1 ] = 8 + nrOfIPts;
+                nrF1++;
+                indices[ 8*2 + nrF3 ] = 8 + nrOfIPts;
+                nrF3++;
+                indices[ 8*2 + nrF3 ] = 4;
+                nrF3++;
+
+                nrOfIPts++;
+                
+            }
+        }
+        else // Intersection in path 1, v1 -> v4.
+        {
+            vertices[ 8 + nrOfIPts ] = vertices[1] + t * (vertices[4] - vertices[1]);
+
+            indices[ nrF1 ] = 8 + nrOfIPts;
+            nrF1++;
+            indices[ 8*4 + nrF5 ] = 8 + nrOfIPts;
+            nrF5++;
+            indices[ 8*4 + nrF5 ] = 1;
+            nrF5++;
+
+            nrOfIPts++;
+        }
+    }
+    else // Intersection in path 1, v0 -> v1.
+    {
+        vertices[ 8 + nrOfIPts ] = vertices[0] + t * (vertices[1] - vertices[0]);
+
+        indices[ 8*3 + nrF4 ] = 8 + nrOfIPts;
+        nrF4++;
+        indices[ 8*4 + nrF5 ] = 8 + nrOfIPts;
+        nrF5++;
+
+        nrOfIPts++;
+    }
+
+    // Path 1: v1 -> v5 (Extra)
+    t = dot( triNormal, triangle[0] - vertices[1] ) / 
+        dot( triNormal, vertices[5] - vertices[1] );
+    t = isfinite(t) ? t : -1.0f;
+    if (t >= 0.0f && t <= 1.0f) // Intersection
+    {
+        vertices[ 8 + nrOfIPts ] = vertices[1] + t * (vertices[5] - vertices[1]);
+
+        indices[ nrF1 ] = 8 + nrOfIPts;
+        nrF1++;
+        indices[ 8*3 + nrF4 ] = 8 + nrOfIPts;
+        nrF4++;
+
+        nrOfIPts++;
+    }
+
+    indices[ 8*4 + nrF5 ] = 0;
+    nrF5++;
+
+    // Path 2: v0 -> v2
+    t = dot( triNormal, triangle[0] - vertices[0] ) / 
+        dot( triNormal, vertices[2] - vertices[0] );
+    t = isfinite(t) ? t : -1.0f;
+    if (t < 0.0f || t > 1.0f) // No intersection
+    {
+        indices[ 8*1 + nrF2 ] = 2;
+        nrF2++;
+        indices[ 8*5 + nrF6 ] = 2;
+        nrF6++;
+
+        // Path 2: v2 -> v5
+        t = dot( triNormal, triangle[0] - vertices[2] ) / 
+            dot( triNormal, vertices[5] - vertices[2] );
+        t = isfinite(t) ? t : -1.0f;
+        if (t < 0.0f || t > 1.0f) // No intersection
+        {
+            indices[ 8*1 + nrF2 ] = 5;
+            nrF2++;
+            indices[ 8*3 + nrF4 ] = 5;
+            nrF4++;
+            indices[ 8*3 + nrF4 ] = 2;
+            nrF4++;
+
+            // Path 2: v5 -> v7
+            t = dot( triNormal, triangle[0] - vertices[5] ) / 
+                dot( triNormal, vertices[7] - vertices[5] );
+            t = isfinite(t) ? t : -1.0f;
+            if (t < 0.0f || t > 1.0f) // No intersection
+            {
+                indices[ nrF1 ] = 7;
+                nrF1++;
+                indices[ nrF1 ] = 5;
+                nrF1++;
+                indices[ 8*1 + nrF2 ] = 7;
+                nrF2++;
+                indices[ 8*2 + nrF3 ] = 7;
+                nrF3++;
+            }
+            else // Intersection
+            {
+                vertices[ 8 + nrOfIPts ] = vertices[5] + t * (vertices[7] - vertices[5]);
+
+                indices[ nrF1 ] = 8 + nrOfIPts;
+                nrF1++;
+                indices[ nrF1 ] = 5;
+                nrF1++;
+                indices[ 8*1 + nrF2 ] = 8 + nrOfIPts;
+                nrF2++;
+
+                nrOfIPts++;
+            }
+        }
+        else // Intersection in path 2, v2 -> v5
+        {
+            vertices[ 8 + nrOfIPts ] = vertices[2] + t * (vertices[5] - vertices[2]);
+
+            indices[ 8*1 + nrF2 ] = 8 + nrOfIPts;
+            nrF2++;
+            indices[ 8*3 + nrF4 ] = 8 + nrOfIPts;
+            nrF4++;
+            indices[ 8*3 + nrF4 ] = 2;
+            nrF4++;
+
+            nrOfIPts++;
+        }
+    }
+    else // Intersection in path 2, v0 -> v2
+    {
+        vertices[ 8 + nrOfIPts ] = vertices[0] + t * (vertices[2] - vertices[0]);
+
+        indices[ 8*3 + nrF4 ] = 8 + nrOfIPts;
+        nrF4++;
+        indices[ 8*5 + nrF6 ] = 8 + nrOfIPts;
+        nrF6++;
+
+        nrOfIPts++;
+    }
+
+    // Path 2: v2 -> v6 (Extra)
+    t = dot( triNormal, triangle[0] - vertices[2] ) / 
+        dot( triNormal, vertices[6] - vertices[2] );
+    t = isfinite(t) ? t : -1.0f;
+    if (t >= 0.0f && t <= 1.0f)
+    {
+        vertices[ 8 + nrOfIPts ] = vertices[2] + t * (vertices[6] - vertices[2]);
+
+        indices[ 8*1 + nrF2 ] = 8 + nrOfIPts;
+        nrF2++;
+        indices[ 8*5 + nrF6 ] = 8 + nrOfIPts;
+        nrF6++;
+
+        nrOfIPts++;
+    }
+
+    // Path 3: v0 -> v3
+    t = dot( triNormal, triangle[0] - vertices[0] ) / 
+        dot( triNormal, vertices[3] - vertices[0] );
+    t = isfinite(t) ? t : -1.0f;
+    if (t < 0.0f || t > 1.0f) // No intersection
+    {
+        indices[ 8*2 + nrF3 ] = 3;
+        nrF3++;
+        indices[ 8*4 + nrF5 ] = 3;
+        nrF5++;
+
+        // Path 3: v3 -> v6
+        t = dot( triNormal, triangle[0] - vertices[3] ) / 
+            dot( triNormal, vertices[6] - vertices[3] );
+        t = isfinite(t) ? t : -1.0f;
+        if (t < 0.0f || t > 1.0f) // No intersection
+        {
+            indices[ 8*2 + nrF3 ] = 6;
+            nrF3++;
+            indices[ 8*5 + nrF6 ] = 6;
+            nrF6++;
+            indices[ 8*5 + nrF6 ] = 3;
+            nrF6++;
+
+            // Path 3: v6 -> v7
+            t = dot( triNormal, triangle[0] - vertices[6] ) / 
+                dot(triNormal, vertices[7] - vertices[6] );
+            t = isfinite(t) ? t : -1.0f;
+            if (t < 0.0f || t > 1.0f) // No intersection
+            {
+                indices[ nrF1 ] = 7;
+                nrF1++;
+                indices[ 8*1 + nrF2 ] = 7;
+                nrF2++;
+                indices[ 8*1 + nrF2 ] = 6;
+                nrF2++;
+                indices[ 8*2 + nrF3 ] = 7;
+                nrF3++;
+            }
+            else // Intersection
+            {
+                vertices[ 8 + nrOfIPts ] = vertices[6] + t * (vertices[7] - vertices[6]);
+
+                indices[ 8*1 + nrF2 ] = 8 + nrOfIPts;
+                nrF2++;
+                indices[ 8*1 + nrF2 ] = 6;
+                nrF2++;
+                indices[ 8*2 + nrF3 ] = 8 + nrOfIPts;
+                nrF3++;
+
+                nrOfIPts++;
+            }
+        }
+        else // Intersection in path 3, v3 -> v6
+        {
+            vertices[ 8 + nrOfIPts ] = vertices[3] + t * (vertices[6] - vertices[3]);
+
+            indices[ 8*2 + nrF3 ] = 8 + nrOfIPts;
+            nrF3++;
+            indices[ 8*5 + nrF6 ] = 8 + nrOfIPts;
+            nrF6++;
+            indices[ 8*5 + nrF6 ] = 3;
+            nrF6++;
+
+            nrOfIPts++;
+        }
+    }
+    else // Intersection in path 3, v0 -> v3
+    {
+        vertices[ 8 + nrOfIPts ] = vertices[0] + t * (vertices[3] - vertices[0]);
+
+        indices[ 8*4 + nrF5 ] = 8 + nrOfIPts;
+        nrF5++;
+        indices[ 8*5 + nrF6 ] = 8 + nrOfIPts;
+        nrF6++;
+
+        nrOfIPts++;
+    }
+
+    // Path 3: v3 -> v4 (Extra)
+    t = dot( triNormal, triangle[0] - vertices[3] ) / 
+        dot( triNormal, vertices[4] - vertices[3] );
+    t = isfinite(t) ? t : -1.0f;
+    if (t >= 0.0f && t <= 1.0f) // Intersection
+    {
+        vertices[ 8 + nrOfIPts ] = vertices[3] + t * (vertices[4] - vertices[3]);
+
+        indices[ 8*2 + nrF3 ] = 8 + nrOfIPts;
+        nrF3++;
+        indices[ 8*4 + nrF5 ] = 8 + nrOfIPts;
+        nrF5++;
+
+        nrOfIPts++;
+    }
+}
+
+__device__ float polyhedronVolume
+    ( float3 * vertices
+    , char   * indices
+    , char     nrOfIPts  ///< [in] Number of vertices in the face made up 
+                         ///<      entirely of the intersection points.
+                         ///<
+    , char     nrF1      ///< [in] Number of vertices in face 1.
+    , char     nrF2      ///< [in] Number of vertices in face 2.
+    , char     nrF3      ///< [in] Number of vertices in face 3.
+    , float3   triNormal ///< [in] Triangle normal.
+    , float3 & dx
+    , float3 & dy
+    , float3 & dz
+    , float  & ipArea
+    , float  & f1Area
+    , float  & f2Area
+    , float  & f3Area
+    )
+{
+    float pl, sin_t, cos_t, volume;
+    float3 rotN, height;
+
+    volume = 0.0f;
+
+    // Rotate the intersection polygon.
+    rotN = triNormal;
+    height = vertices[0];
+    
+    float3 base[6];
+
+    ipArea = 0.0f;
+    f1Area = 0.0f;
+    f2Area = 0.0f;
+    f3Area = 0.0f;
+
+    if ( nrOfIPts < 3 )
+        return 0.0f;
+
+    for ( int i = 0; i < nrOfIPts; ++i )
+        base[i] = vertices[8 + i];
+
+    if (rotN.y != 0.0f)
+    {
+        pl = length(make_float2(rotN.y, rotN.z));
+        sin_t = rotN.y / pl;
+        cos_t = rotN.z / pl;
+
+        height = rotX(height, sin_t, cos_t);
+
+        for (int i = 0; i < nrOfIPts; i++)
+            base[i] = rotX(base[i], sin_t, cos_t);
+
+        rotN = rotX(rotN, sin_t, cos_t);
+    }
+
+    if (rotN.x != 0.0f)
+    {
+        pl = length(make_float2(rotN.z, rotN.x));
+        sin_t = -rotN.x / pl;
+        cos_t = rotN.z / pl;
+
+        height = rotY(height, sin_t, cos_t);
+
+        for (int i = 0; i < nrOfIPts; i++)
+            base[i] = rotY(base[i], sin_t, cos_t);
+    }
+
+    volume += pyramidVolume( base, nrOfIPts, height, ipArea );
+
+    // Rotate the face1 polygon.
+    if (nrF1 > 2)
+    {
+        for ( int i = 0; i < nrF1; ++i )
+        {
+            float3 v = vertices[indices[i]];
+
+            base[i].x = dx.x != 0.0f ? -v.z : v.x;
+            base[i].y = dx.y != 0.0f ? -v.z : v.y;
+
+            base[i].z = 0.0f;
+            base[i].z += dx.x != 0.0f ? v.x : 0.0f;
+            base[i].z += dx.y != 0.0f ? v.y : 0.0f;
+            base[i].z += dx.z != 0.0f ? v.z : 0.0f;
+        }
+
+        height.x = dx.x != 0.0f ? -vertices[0].z : vertices[0].x;
+        height.y = dx.y != 0.0f ? -vertices[0].z : vertices[0].y;
+
+        height.z = 0.0f;
+        height.z += dx.x != 0.0f ? vertices[0].x : 0.0f;
+        height.z += dx.y != 0.0f ? vertices[0].y : 0.0f;
+        height.z += dx.z != 0.0f ? vertices[0].z : 0.0f;
+
+        volume += pyramidVolume( base, nrF1, height, f1Area );
+    }
+
+    // Rotate the face2 polygon.
+    if (nrF2 > 2)
+    {
+        for ( int i = 0; i < nrF2; ++i )
+        {
+            float3 v = vertices[indices[8+i]];
+
+            base[i].x = dy.x != 0.0f ? -v.z : v.x;
+            base[i].y = dy.y != 0.0f ? -v.z : v.y;
+
+            base[i].z = 0.0f;
+            base[i].z += dy.x != 0.0f ? v.x : 0.0f;
+            base[i].z += dy.y != 0.0f ? v.y : 0.0f;
+            base[i].z += dy.z != 0.0f ? v.z : 0.0f;
+        }
+
+        height.x = dy.x != 0.0f ? -vertices[0].z : vertices[0].x;
+        height.y = dy.y != 0.0f ? -vertices[0].z : vertices[0].y;
+
+        height.z = 0.0f;
+        height.z += dy.x != 0.0f ? vertices[0].x : 0.0f;
+        height.z += dy.y != 0.0f ? vertices[0].y : 0.0f;
+        height.z += dy.z != 0.0f ? vertices[0].z : 0.0f;
+
+        volume += pyramidVolume( base, nrF2, height, f2Area );
+    }
+
+    // Rotate the face3 polygon.
+    if (nrF3 > 2)
+    {
+        for ( int i = 0; i < nrF3; ++i )
+        {
+            float3 v = vertices[indices[8*2+i]];
+
+            base[i].x = dz.x != 0.0f ? -v.z : v.x;
+            base[i].y = dz.y != 0.0f ? -v.z : v.y;
+
+            base[i].z = 0.0f;
+            base[i].z += dz.x != 0.0f ? v.x : 0.0f;
+            base[i].z += dz.y != 0.0f ? v.y : 0.0f;
+            base[i].z += dz.z != 0.0f ? v.z : 0.0f;
+        }
+
+        height.x = dz.x != 0.0f ? -vertices[0].z : vertices[0].x;
+        height.y = dz.y != 0.0f ? -vertices[0].z : vertices[0].y;
+
+        height.z = 0.0f;
+        height.z += dz.x != 0.0f ? vertices[0].x : 0.0f;
+        height.z += dz.y != 0.0f ? vertices[0].y : 0.0f;
+        height.z += dz.z != 0.0f ? vertices[0].z : 0.0f;
+
+        volume += pyramidVolume( base, nrF3, height, f3Area );
+    }
+
+    return volume;
+}
+
+__device__ float pyramidVolume
+    ( float3 * base ///< [in] Vertices of the base polygon.
+    , int nrOfVerts    ///< [in] Number of vertices in the base.
+    , float3 height ///< [in] Highest point of the pyramid.
+    , float & baseArea
+    )
+{
+    baseArea = polygonArea( base, nrOfVerts );
+
+    float volume = (1.0f / 3.0f) * baseArea * (height.z - base[0].z);
+    return fabs( volume );
+}
+
+__device__ float polygonArea
+    ( float3 * base
+    , int nrOfVerts
+    )
+{
+    // Surveyor's algorithm for the area of the base polygon.
+    float baseArea = 0.0f;
+    for (int i = 0; i < nrOfVerts; i++)
+    {
+        float3 v0 = base[i];
+        float3 v1 = base[(i+1) % nrOfVerts];
+
+        baseArea += 0.5f * (v0.x * v1.y - v1.x * v0.y);
+    }
+
+    return baseArea;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///
+///////////////////////////////////////////////////////////////////////////////
+template <class Node>
+__global__ void fillHashMap
+    ( Node * nodes
+    , HashMap map
+    , const uint3 dim
+    )
+{
+    // A single block is running with 1024 threads.
+    // The threads are grouped into 32 warps => (32,32)-configuration.
+    // <<< 1, dim3(32,32,1) >>>
+    // 32 unsigned integers are required to keep track of inter-warp 
+    // highest indices.
+    // 32 bools are required to keep track of the status of each warp.
+
+    // threadIdx.x & threadIdx.y = indices into the (32,32)-config.
+    // blockDim.x & blockDim.y = 32 each
+    // gridDim.x = 1
+    // Define threadIdx.x as the warp index and threadIdx.y as the thread idx.
+
+    __shared__ uint index[33];
+
+    const uint maxNodeIdx = dim.x * dim.y * dim.z;
+    const uint threads = blockDim.x * blockDim.y;
+    const uint maxN = maxNodeIdx + (threads - maxNodeIdx % threads);
+
+    index[threadIdx.y + 1] = 0;
+    if ( threadIdx.x == 0 && threadIdx.y == 0 ) index[0] = 0;
+
+    for ( uint n = blockDim.x * threadIdx.y + threadIdx.x
+        ; n < maxN
+        ; n += blockDim.x * blockDim.y )
+    {
+        __syncthreads();
+
+        uint count = UINT_MAX;
+
+        if ( n < maxNodeIdx )
+        {
+            const uint nodeType = uint(nodes[n].bid()); 
+            const uint ballot = __ballot( nodeType );
+
+            if ( ballot == 0u )
+            {
+                index[threadIdx.y + 1] = 0;
+            }
+            else if ( ((1u << threadIdx.x) & ballot) > 0 )
+            {
+                bool last = true;
+                count = 0;
+                for ( int i = 0; i < 32; ++i )
+                {
+                    const bool p = i > threadIdx.x;
+                    const bool isect = ((1u << i) & ballot) > 0;
+                    count += isect ? !p : 0;
+                    last = p && isect ? false : last;
+                }
+
+                if ( last ) index[threadIdx.y + 1] = count;
+                count -= 1;
+            }
+        }
+
+        __syncthreads();
+
+        if ( threadIdx.x == 0 && threadIdx.y == 0 )
+        {
+            for ( int i = 0; i < 32; ++i )
+            {
+                index[i+1] += index[i];
+            }
+        }
+
+        __syncthreads();
+
+        if ( count != UINT_MAX )
+        {
+            map.insert( n, count + index[threadIdx.y] );
+        }
+
+        __syncthreads();
+
+        if ( threadIdx.x == 0 && threadIdx.y == 0 )
+        {
+            index[0] = index[32];
+        }
+    }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 /// \brief "Uses" functions to make the compiler include them into the library.
 ///
@@ -4859,29 +5932,33 @@ __global__ void zeroPadding
 /// class, the functions should be added here. Then, this function will be 
 /// called with each Node type from the masterDummyFunction.
 ///////////////////////////////////////////////////////////////////////////////
-template <class Node> void dummyFunction()
+template <class Node, class SNode> void dummyFunction()
 {
     CommonDevData dd;
     CommonHostData hd;
     Bounds<uint2> ui2b;
     Bounds<uint3> ui3b;
     Node * n = NULL;
+    SNode * sn = NULL;
     VoxInt * v = NULL;
     clock_t t = 0;
     bool * b = NULL;
     float * f = NULL;
     uint * u = NULL;
     uchar * c = NULL;
+    HashMap h;
 
     calcNodeList<Node>( dd, v, n, ui2b, t, true );
     launchConvertToFCCGrid<Node>( dd, v, n, ui2b, int(0), t, true );
-    procNodeList<Node>( dd, n, n, b, ui2b, true, t, true );
+    procNodeList<Node,SNode>( dd, n, n, b, ui2b, true, sn, t, true );
     launchCalculateFCCBoundaries<Node>( dd, n, n, ui2b, true, t, true );
     calcSurfaceVoxelization<Node>( dd, hd, f, u, n, c, t, true );
-    calcOptSurfaceVoxelization<Node>( dd, hd, f, u, u, u, c, n, ui3b, int(0)
-                                    , t, true );
+    calcOptSurfaceVoxelization<Node,SNode>( dd, hd, f, u, u, u, c, n, ui3b, int(0)
+                                    , false, sn, t, true );
     makePaddingZero<Node>( dd, n, n, true, t, true );
     restoreRotatedNodes<Node>( dd, n, n, ui2b, t, true );
+    calcSurfNodeCount<Node>( dd, n, t, true );
+    populateHashMap<Node>( dd, n, t, true );
 }
 ///////////////////////////////////////////////////////////////////////////////
 /// \brief "Uses" functions with every \p Node type to force the compiler to 
@@ -4899,10 +5976,10 @@ void masterDummyFunction()
     Bounds<uint3> ui3b;
     VoxInt * v = NULL;
     clock_t t = 0;
-    bool * b = NULL;
+    //bool * b = NULL;
     float * f = NULL;
     uint * u = NULL;
-    uchar * c = NULL;
+    //uchar * c = NULL;
 
     sortWorkQueue( dd, u, u, t, true );
     compactWorkQueue( dd, u, u, u, t, true );
@@ -4912,10 +5989,12 @@ void masterDummyFunction()
     calcTriangleClassification( dd, hd, f, u, u, u, t, true );
 }
 
-template void dummyFunction<ShortNode>();
-template void dummyFunction<LongNode>();
-template void dummyFunction<PartialNode>();
-template void dummyFunction<ShortFCCNode>();
-template void dummyFunction<LongFCCNode>();
+template void dummyFunction<ShortNode, SurfaceNode>();
+template void dummyFunction<LongNode, SurfaceNode>();
+template void dummyFunction<PartialNode, SurfaceNode>();
+template void dummyFunction<ShortFCCNode, SurfaceNode>();
+template void dummyFunction<LongFCCNode, SurfaceNode>();
+template void dummyFunction<VolumeNode, SurfaceNode>();
+template void dummyFunction<VolumeMapNode, SurfaceNode>();
 
 } // End namespace vox

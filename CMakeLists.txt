@@ -26,7 +26,7 @@ set( Boost_USE_STATIC_RUNTIME OFF )
 set( Boost_NO_BOOST_CMAKE ON )
 
 # Require Boost >= 1.53 with system and thread components.
-find_package( Boost 1.53 REQUIRED COMPONENTS system thread chrono date_time )
+find_package( Boost 1.53 REQUIRED COMPONENTS system thread  date_time )
 
 # If boost cannot be found, make a cache variable that allows the user to 
 # specify the Boost root directory where the libraries and includes are found.
@@ -62,13 +62,12 @@ option( GENERATE_TESTS "Adds the compilation of a test program as a target." OFF
 
 # Configuration-dependent settings.
 set( CMAKE_DEBUG_POSTFIX "_d" )
-set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};-gencode arch=compute_30,code=sm_30 )
-set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};-gencode arch=compute_30,code=sm_30 )
+set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};-gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 )
+set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};-gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 )
 
 # Unix-specific compiler flags. 
 if ( UNIX )
-set( CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -w" )
-set( CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -w" )
+set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -m64 -fPIC" )
 endif ()
 
 #message( STATUS "R Flags: ${CMAKE_CXX_FLAGS_RELEASE}" )

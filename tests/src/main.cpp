@@ -54,8 +54,8 @@ template <class Node>
 void testMaterialsLoop(Node const * nodes, float const * vertices, uint const * indices, uint nrOfTriangles, uint3 resolution, float voxelLength);
 std::pair<std::unique_ptr<float[]>, std::unique_ptr<uint[]> > loadModel(vtkSmartPointer<vtkPolyData> & model, uint &nrOfVertices, uint &nrOfTriangles);
 void testCrossproduct();
-template <class Node>
-uint numberOfNodesWithNoMaterial(Node* nodes, uint3 resolution);
+template <class Node, class SNode>
+uint numberOfNodesWithNoMaterial(Node* nodes, SNode* surfNodes, vox::HashMap & hashMap, uint3 resolution);
 void testTrianglePlaneIntersection();
 template <class Node>
 void analyzeRatioNodes(Node* nodes, uint3 resolution, float voxelLength, int nthErroneousRatio);
@@ -78,6 +78,21 @@ void applySlice( Node * slice
                , uint direction );
 template <class NT>
 void renderFCCNodeOutput(NT* nodes, bool onlySurface, bool materials, uint3 res);
+
+template <class Node, class SNode>
+void renderSurfNodeOutput( Node * nodes
+                         , SNode * surfNodes
+                         , vox::HashMap & hashMap
+                         , bool materials
+                         , uint3 res );
+
+template <class Node, class SNode>
+void analyzeSurfaceNodes( Node * nodes
+                        , SNode * surfNodes
+                        , vox::HashMap & hashMap
+                        , uint3 dim
+                        , uint nrOfSurfNodes );
+
 void testFunction();
 
 template <typename T>
@@ -122,77 +137,11 @@ void performAllSliceTest
     , const boost::program_options::variables_map & vm
     );
 
-class TestClass
-{
-public:
-    TestClass() throw() { 
-        a = "-"; 
-        print( "Default constructor! ( " + a + " )\n" ); 
-    }
-    TestClass( int i ) throw() {
-        a = std::to_string((long long)i);
-        print( std::string( "Constructor with argument " + a + "\n" ) );
-    }
-    TestClass( const TestClass & rhs ) throw() {
-        auto oldA = a;
-        a = rhs.a; 
-        print( "Copy constructor! ( " + oldA + " to " + a + " )\n" ); 
-    }
-    TestClass( TestClass && rhs ) throw() { 
-        auto oldA = a;
-        std::swap( a, rhs.a );
-        print( "Move constructor! ( " + oldA + " to " + a + " )\n" ); 
-    }
-    ~TestClass() { print( "Default destructor! ( " + a + " )\n" );  }
-
-    TestClass & operator=( const TestClass & rhs ) throw() {
-        auto oldA = a;
-        a = rhs.a;
-        print( "Copy assignment! ( " + oldA + " to " + a + " )\n" ); 
-        return *this;
-    }
-    TestClass & operator=( TestClass && rhs ) throw() {
-        auto oldA = a;
-        std::swap( a, rhs.a );
-        print( "Move assignment! ( " + oldA + " to " + a + " )\n" ); 
-        return *this;
-    }
-
-    std::string get() const throw() { return a; }
-
-private:
-    std::string a;
-
-    void print( std::string msg ) throw() { std::cout << msg; }
-};
-
-class Printable
-{
-public:
-    virtual std::string print() = 0;
-};
-
-class Person : public Printable
-{
-public:
-    Person() {}
-    Person( std::string n ) { name = n; }
-
-    std::string print() { return std::string( "Person name: " ) + name + "\n"; }
-private:
-    std::string name;
-};
-
-class Car : public Printable
-{
-public:
-    Car() {}
-    Car( std::string m ) { model = m; }
-
-    std::string print() { return std::string( "Car model: " ) + model + "\n"; }
-private:
-    std::string model;
-};
+template<class Node>
+void performTwoArrayTest
+    ( vox::Voxelizer<Node> & voxelizer
+    , const boost::program_options::variables_map & vm
+    );
 
 int main(int argc, char** argv)
 {
@@ -236,6 +185,8 @@ int main(int argc, char** argv)
         , "Prints detailed information about the voxelization." )
         ( "surface,u"
         , "Only renders the surface of the voxelization." )
+        ( "twoarrays,2"
+        , "Voxelize with two arrays: Surface and Volume nodes." )
         ( "filename"
         , boost::program_options::value<std::string>()->required()
         , "File to be voxelized." )
@@ -415,7 +366,14 @@ int main(int argc, char** argv)
         std::cout << "Invalid model data given" << std::endl;
         return 1;
     }
+    else if ( vm.count( "twoarrays" ) )
+    {
+        std::cout << "Starting tests with vox::VolumeNode and "
+            "vox::SurfaceNode @ " << sizeof(vox::VolumeNode) << " and " << 
+            sizeof(vox::SurfaceNode) << " bytes per node.\n";
 
+        initTests<vox::VolumeNode>( vm, polys );
+    }
     else if ( vm.count( "long" ) )
     {
         if ( vm.count( "fcc" ) )
@@ -664,6 +622,117 @@ void renderNodeOutput(NT* nodes, bool onlySurface, bool materials, uint3 res)
 
     vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     mapper->SetInputData(polydata);
+
+    vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+    actor->SetMapper(mapper);
+    actor->GetProperty()->SetPointSize(1);
+
+    vtkSmartPointer<vtkRenderer> renderer = vtkSmartPointer<vtkRenderer>::New();
+    vtkSmartPointer<vtkRenderWindow> renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->AddRenderer(renderer);
+
+    vtkSmartPointer<vtkRenderWindowInteractor> renderWindowInteractor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
+    renderWindowInteractor->SetRenderWindow(renderWindow);
+
+    renderer->AddActor(actor);
+
+    renderWindow->Render();
+    renderWindowInteractor->Start();
+}
+
+template <class Node, class SNode>
+void renderSurfNodeOutput( Node * nodes
+                         , SNode * surfNodes
+                         , vox::HashMap & hashMap
+                         , bool materials
+                         , uint3 res )
+{
+    vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
+    vtkSmartPointer<vtkCellArray> cells = vtkSmartPointer<vtkCellArray>::New();
+
+    // Colors
+    unsigned char black[3] = { 0, 0, 0 };
+    unsigned char red[3] = { 255, 0, 0 };
+    unsigned char green[3] = { 0, 255, 0 };
+    unsigned char blue[3] = { 0, 0, 255 };
+    unsigned char yellow[3] = { 255, 255, 0 };
+    unsigned char purple[3] = { 255, 0, 255 };
+    unsigned char aquamarine[3] = { 0, 255, 255 };
+    unsigned char grey[3] = { 127, 127, 127 };
+
+    unsigned char white[3] = { 255, 255, 255 };
+
+    unsigned char * colorList[8] = { white, red, green, blue, yellow, purple, aquamarine, grey };
+
+    vtkSmartPointer<vtkUnsignedCharArray> colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
+    colors->SetNumberOfComponents(3);
+    colors->SetName("Color");
+
+    for (uint nodeIdx = 0; nodeIdx < res.x * res.y * res.z; nodeIdx++)
+    {
+        
+        // Ignore non-solid nodes.
+        
+        
+        if (nodes[nodeIdx].bid() == 0)
+            continue;
+
+        // Ignore air nodes.
+        if (nodes[nodeIdx].bid() == 27)
+            continue;
+
+        uint surfNodeIdx = hashMap.get( nodeIdx );
+        
+        if ( surfNodeIdx == UINT32_MAX )
+            continue;
+
+        SNode surfNode = surfNodes[surfNodeIdx];
+        
+        
+        if (materials)
+        {
+            // Ignore nodes with zero material.
+            if (surfNode.material == 0)
+                continue;
+        }
+
+        /*
+        if ( surfNode.orientation == 0 || surfNode.orientation == 27 )
+            continue;
+        */
+        
+        
+        if ( surfNode.volume == 0.0f )
+            continue;
+        
+
+        uint x = nodeIdx % res.x;
+        uint y = (nodeIdx % (res.x * res.y)) / res.x;
+        uint z = nodeIdx / (res.x * res.y);
+
+        points->InsertNextPoint(double(x), double(y), double(z));
+        
+        
+        if (materials)
+            colors->InsertNextTupleValue(colorList[surfNode.material]);
+        else
+            colors->InsertNextTupleValue(white);
+    }
+
+    vtkSmartPointer<vtkPolyData> data = vtkSmartPointer<vtkPolyData>::New();
+    data->SetPoints(points);
+
+    vtkSmartPointer<vtkVertexGlyphFilter> vertexFilter = vtkSmartPointer<vtkVertexGlyphFilter>::New();
+    vertexFilter->SetInputConnection(data->GetProducerPort());
+    vertexFilter->Update();
+
+    vtkSmartPointer<vtkPolyData> polydata = vtkSmartPointer<vtkPolyData>::New();
+    polydata->ShallowCopy(vertexFilter->GetOutput());
+
+    polydata->GetPointData()->SetScalars(colors);
+
+    vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    mapper->SetInput(polydata);
 
     vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
     actor->SetMapper(mapper);
@@ -980,8 +1049,11 @@ void testCrossproduct()
     cout << "X: " << n5.x << ", Y: " << n5.y << ", Z: " << n5.z << ".\n";
 }
 
-template <class Node>
-uint numberOfNodesWithNoMaterial(Node* nodes, uint3 resolution)
+template <class Node, class SNode>
+uint numberOfNodesWithNoMaterial( Node* nodes
+                                , SNode* surfNodes
+                                , vox::HashMap & hashMap
+                                , uint3 resolution )
 {
     uint count = 0;
     Node node;
@@ -993,15 +1065,36 @@ uint numberOfNodesWithNoMaterial(Node* nodes, uint3 resolution)
         {
             if ( node.bid() == 0 || node.bid() == 4095 )
                 continue;
+
+            if ( node.mat() == 0 )
+                count++;
+        }
+        else if ( Node::usesTwoArrays() )
+        {
+            if ( node.bid() == 0 || node.bid() == 27 )
+                continue;
+
+            uint surfIdx = hashMap.get( i );
+
+            if ( surfIdx == UINT32_MAX )
+            {
+                count++;
+                continue;
+            }
+
+            SNode surfNode = surfNodes[surfIdx];
+
+            if ( surfNode.material == 0 )
+                count++;
         }
         else
         {
             if ( node.bid() == 0 || node.bid() == 27 )
                 continue;
-        }
 
-        if ( node.mat() == 0 )
-            count++;
+            if ( node.mat() == 0 )
+                count++;
+        }
     }
     return count;
 }
@@ -1535,11 +1628,15 @@ void initTests
         nrOfUniqueMaterials = 0;
 
     auto modelData = loadModel( polys, nrOfVertices, nrOfTriangles );
+
+    std::cout << "Entering constructor.\n";
     
     vox::Voxelizer<Node> voxelizer( modelData.first.get()
                                   , modelData.second.get()
                                   , nrOfVertices
                                   , nrOfTriangles );
+
+    std::cout << "Exited constructor.\n";
 
     if ( vm.count( "verbose" ) )
         voxelizer.verboseOutput( true );
@@ -1560,7 +1657,11 @@ void initTests
         voxelizer.setMaterialOutput( true );
     }
 
-    if ( vm.count( "voxels" ) )
+    if ( vm.count( "twoarrays" ) )
+    {
+        performTwoArrayTest( voxelizer, vm );
+    }
+    else if ( vm.count( "voxels" ) )
     {
         performPlainVoxelTest( voxelizer, vm );
     }
@@ -1707,7 +1808,7 @@ void performSliceTest
 
     if ( vm.count( "materials" ) )
     {
-        uint badNodes = numberOfNodesWithNoMaterial( result.ptr, result.dim );
+        uint badNodes = numberOfNodesWithNoMaterial( result.ptr, (vox::SurfaceNode*)NULL, vox::HashMap(), result.dim );
         std::cout << "Found " << badNodes << " boundary nodes with no material"
             "\n";
     }
@@ -1809,10 +1910,162 @@ void performNodeTest
 
     if ( vm.count( "materials" ) )
     {
-        uint badNodes = numberOfNodesWithNoMaterial( nodes.get(), res );
+        uint badNodes = numberOfNodesWithNoMaterial( nodes.get(), (vox::SurfaceNode*)NULL, vox::HashMap(), res );
         std::cout << "Found " << badNodes << " boundary nodes with no material"
             "\n";
     }
+}
+
+template<class Node>
+void performTwoArrayTest
+    ( vox::Voxelizer<Node> & voxelizer
+    , const boost::program_options::variables_map & vm
+    )
+{
+    std::cout << "Entered performTwoArrayTest.\n";
+
+    std::vector<vox::Node2APointer<Node, vox::SurfaceNode> > result;
+
+    uint3 voxSplitRes = { 1024, 512, 512 };
+    if ( vm.count( "voxRes" ) )
+    {
+        auto newVoxSplitRes = vm[ "voxRes" ].as<std::vector<uint> >();
+        voxSplitRes.x = newVoxSplitRes.at(0);
+        voxSplitRes.y = newVoxSplitRes.at(1);
+        voxSplitRes.z = newVoxSplitRes.at(2);
+    }
+    uint3 matSplitRes = { 1024, 512, 512 };
+    if ( vm.count( "matRes" ) )
+    {
+        auto newMatSplitRes = vm[ "matRes" ].as<std::vector<uint> >();
+        matSplitRes.x = newMatSplitRes.at(0);
+        matSplitRes.y = newMatSplitRes.at(1);
+        matSplitRes.z = newMatSplitRes.at(2);
+    }
+
+    uint2 devConf = { 1, 1 };
+
+    if ( vm.count( "resolution" ) )
+    {
+        auto resolution = vm[ "resolution" ].as<uint>();
+
+        if ( vm.count( "multiDevice" ) )
+        {
+            auto dc = vm[ "multiDevice" ].as<std::vector<uint> >();
+            devConf.x = dc[0];
+            devConf.y = dc[1];
+            /*
+            result = voxelizer.simulateMultidevice( 
+                [&] () { return voxelizer.voxelizeToSurfaceNodes
+                                    ( resolution
+                                    , devConf
+                                    , voxSplitRes
+                                    , matSplitRes ); 
+                } );
+            */
+        }
+        else
+            result.push_back( voxelizer.voxelizeToSurfaceNodesToRAM
+                                        ( resolution
+                                        , voxSplitRes
+                                        , matSplitRes ) );
+    }
+    else if ( vm.count( "distance" ) )
+    {
+        auto distance = vm[ "distance" ].as<double>();
+
+        if ( vm.count( "multiDevice" ) )
+        {
+            auto dc = vm[ "multiDevice" ].as<std::vector<uint> >();
+            devConf.x = dc[0];
+            devConf.y = dc[1];
+
+            /*
+            result = voxelizer.simulateMultidevice( 
+                [&] () { return voxelizer.voxelizeToSurfaceNodes
+                                            ( distance
+                                            , devConf
+                                            , voxSplitRes
+                                            , matSplitRes ); 
+                } );
+            */
+        }
+        else
+            result.push_back( voxelizer.voxelizeToSurfaceNodesToRAM
+                                        ( distance
+                                        , voxSplitRes
+                                        , matSplitRes ) );
+    }
+
+    bool renderMaterials = vm.count( "materials" ) > 0;
+
+    /*
+    uint3 res = vm.count( "multiDevice" ) ? fetchResolution( result, devConf )
+                                          : result[0].dim;
+    auto nodes = std::unique_ptr<Node>( 
+        vm.count( "multiDevice" ) ? stitchNodeArrays( result, devConf ) 
+                                  : result[0].nodes );
+    */
+
+    renderSurfNodeOutput( result[0].nodes
+                        , result[0].surfNodes
+                        , result[0].indices
+                        , renderMaterials
+                        , result[0].dim );
+
+    uint nrOfNodes = result[0].dim.x * result[0].dim.y * result[0].dim.z;
+
+    uint nrOfSurfaceNodes = 0;
+    uint nrOfMatches = 0;
+    uint prevIdx = UINT32_MAX;
+    for ( uint n = 0; n < nrOfNodes; ++n )
+    {
+        uint i = result[0].indices.get(n);
+
+        if ( i == UINT32_MAX )
+            continue;
+
+        nrOfSurfaceNodes++;
+
+        if ( prevIdx == UINT32_MAX )
+            prevIdx = i;
+        else
+        {
+            if ( prevIdx + 1 == i )
+                prevIdx = i;
+        }
+
+        nrOfMatches++;
+
+        //vox::SurfaceNode sn = result[0].surfNodes[i];
+
+        //if ( sn.orientation == 0 )
+        //    nrOfMatches++;
+    }
+
+    std::cout << "\n\n";
+
+    std::cout << "Nr of surface nodes found: " << nrOfSurfaceNodes << "\n";
+    std::cout << "Nr of matching nodes found: " << nrOfMatches << "\n";
+    std::cout << "Largest continuous index: " << prevIdx << "\n";
+
+    
+    if ( vm.count( "materials" ) )
+    {
+        uint badNodes = numberOfNodesWithNoMaterial( result[0].nodes
+                                                   , result[0].surfNodes
+                                                   , result[0].indices
+                                                   , result[0].dim );
+        std::cout << "Found " << badNodes << " boundary nodes with no material"
+            "\n";
+    }
+    
+
+    analyzeSurfaceNodes( result[0].nodes
+                       , result[0].surfNodes
+                       , result[0].indices
+                       , result[0].dim
+                       , result[0].nrOfSurfNodes );
 }
 
 template<class Node>
@@ -1933,7 +2186,7 @@ void performAllSliceTest
 
     if ( vm.count( "materials" ) )
     {
-        uint badNodes = numberOfNodesWithNoMaterial( nodes, res );
+        uint badNodes = numberOfNodesWithNoMaterial( nodes, (vox::SurfaceNode*)NULL, vox::HashMap(), res );
         std::cout << "Found " << badNodes << " boundary nodes with no material"
             "\n";
     }
@@ -1943,7 +2196,135 @@ void testFunction()
 {
     std::cout << "Entering test function.\n";
 
-    std::cout << "Exiting test function.\n";
+    const int max_x = 100;
+    const int max_y = 100;
+    const int max_z = 100;
+
+    const int n = max_x * max_y * max_z;
+    const int s = 1.5f * n;
+
+    uint collisions[100] = {0};
+
+    std::cout << "Creating HashMap with size " << s << "\n";
+    std::cout << "It will require " << (sizeof(uint64_t)*s / (1024.0 * 1024.0)) << " MB\n";
+
+    vox::HashMap hashMap( s );
+    hashMap.allocateHost();
+
+    std::cout << "Inserting " << n << " values into HashMap\n";
+
+    bool error = true;
+    uint retries = 0;
+    while ( error )
+    {
+        error = false;
+        for ( int z = 0; z < max_z; ++z )
+        {
+            if ( error ) break;
+            for ( int y = 0; y < max_y; ++y )
+            {
+                if ( error ) break;
+                for ( int x = 0; x < max_x; ++x )
+                {
+                    if ( error ) break;
+                    const uint id = max_x * max_y * z + max_x * y + x;
+                    const uint nrOfCollisions = hashMap.insertHost( id, id );
+                    if ( nrOfCollisions > 100 )
+                    {
+                        error = true;
+                        retries++;
+                    }
+
+                    collisions[nrOfCollisions]++;
+                }
+            }
+        }
+
+        if ( error )
+        {
+            for ( int i = 0; i < 100; ++i )
+                collisions[i] = 0;
+            hashMap.renewHashPrime();
+            hashMap.clearHost();
+        }
+
+        if ( retries > 1000 )
+        {
+            std::cout << "Couldn't create HashMap\n";
+            return;
+        }
+    }
+
+    std::cout << "Created HashMap after " << retries << " retries\n";
+    std::cout << "Retrieving " << n << " values from HashMap\n\n";
+
+    for ( int x = 0; x < max_x; ++x )
+    {
+        for ( int y = 0; y < max_y; ++y )
+        {
+            for ( int z = 0; z < max_z; ++z )
+            {
+                const uint32_t id = max_x * max_y * z + max_x * y + x;
+                const uint32_t result = hashMap.get( id );
+
+                if ( id != result )
+                {
+                    std::cout << "Failed to retrieve ( " << id << " ) from the HashMap\n";
+                    std::cout << "Received " << result << " instead\n";
+                    return;
+                }
+            }
+        }
+    }
+
+    std::cout << "Elements with 00 collisions: " << collisions[0] << "\n";
+
+    for ( int i = 1; i < 100; ++i )
+    {
+        if ( collisions[i] != 0 )
+        {
+            if ( i < 10 )
+                std::cout << "Elements with 0" << i << " collisions: " << collisions[i] << "\n";
+            else
+                std::cout << "Elements with " << i << " collisions: " << collisions[i] << "\n";
+        }
+    }
+
+    uint8_t charArray[12] = { 1, 2, 3, 4, 5, 254, 7, 255, 9, 10, 11, 12 };
+
+    std::cout << "Array of 12 chars read as chars: \n";
+
+    for ( int i = 0; i < 12; ++i )
+        std::cout << uint32_t(charArray[i]) << ", ";
+
+    std::cout << "\n\nArray of 12 chars read as 32-bit integers: \n";
+
+    uint32_t * arrayAsInt = (uint32_t*)charArray;
+
+    for ( int i = 0; i < 12; ++i )
+    {
+        arrayAsInt = (uint32_t*)&charArray[i];
+        uint32_t val = *arrayAsInt;
+
+        //val = val >> (i > 11 - 3 ? 11 - i : 3) * 8;
+        //val = val & uint32_t(UINT8_MAX);
+
+        std::cout << val << ", ";
+
+        *arrayAsInt = val + 1;
+    }
+
+    std::cout << "\n\n";
+
+    std::cout << "Array of 12 chars read as chars: \n";
+
+    for ( int i = 0; i < 12; ++i )
+        std::cout << uint32_t(charArray[i]) << ", ";
+
+    std::cout << "\n\n";
+
+
+    std::cout << "\nExiting test function.\n";
 }
 
 inline std::string printUint3( uint3 & vec )
@@ -1975,4 +2356,65 @@ void validate( std::string var
             std::exit( 1 );
         }
     }
+}
+
+template <class Node, class SNode>
+void analyzeSurfaceNodes( Node * nodes
+                        , SNode * surfNodes
+                        , vox::HashMap & hashMap
+                        , uint3 dim
+                        , uint nrOfSurfNodes )
+{
+    uint orientations[28] = {0};
+    uint nodesWithMaterials = 0;
+    uint nodesWithVolume = 0;
+    uint nodesWithAreas = 0;
+    uint accessibleSurfNodes = 0;
+    uint sameBids = 0;
+    for ( uint i = 0; i < nrOfSurfNodes; ++i )
+    {
+        SNode n = surfNodes[i];
+
+        orientations[n.orientation] += 1;
+
+        if ( n.material != 0 ) nodesWithMaterials++;
+        if ( n.volume > 0.0f ) nodesWithVolume++;
+        if ( n.xPosArea > 0.0f || n.xNegArea > 0.0f || 
+             n.yPosArea > 0.0f || n.yNegArea > 0.0f || 
+             n.zPosArea > 0.0f || n.zNegArea > 0.0f || n.cutArea > 0.0f )
+        {
+            nodesWithAreas++;
+        }
+    }
+
+    uint nrOfNodes = dim.x * dim.y * dim.z;
+    for ( uint n = 0; n < nrOfNodes; ++n )
+    {
+        uint idx = hashMap.get(n);
+
+        if ( idx == UINT32_MAX )
+            continue;
+
+        accessibleSurfNodes++;
+
+        SNode sn = surfNodes[idx];
+
+        if ( sn.orientation == nodes[n].bid() )
+            sameBids++;
+
+
+    }
+
+    std::cout << "Orientation spread among surface nodes:\n";
+    for ( int i = 0; i < 10; ++i )
+        std::cout << "Orientation  " << i << ": " << orientations[i] << "\n";
+    for ( int i = 10; i < 28; ++i )
+        std::cout << "Orientation " << i << ": " << orientations[i] << "\n";
+
+    std::cout << "Number of Surface nodes : " << nrOfSurfNodes << "\n";
+    std::cout << "Nodes with materials    : " << nodesWithMaterials << "\n";
+    std::cout << "Nodes with volume       : " << nodesWithVolume << "\n";
+    std::cout << "Nodes with areas        : " << nodesWithAreas << "\n";
+    std::cout << "Accessible nodes        : " << accessibleSurfNodes << "\n";
+    std::cout << "Nodes with same bid     : " << sameBids << "\n";
 }
