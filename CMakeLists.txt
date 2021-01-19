@@ -67,7 +67,7 @@ set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};-gencode arch=compute_60,cod
 
 # Unix-specific compiler flags. 
 if ( UNIX )
-set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -m64 -fPIC" )
+set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -m64 -std=gnu++11 -fPIC" )
 endif ()
 
 #message( STATUS "R Flags: ${CMAKE_CXX_FLAGS_RELEASE}" )
