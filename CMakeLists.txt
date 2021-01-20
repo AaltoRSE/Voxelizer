@@ -5,6 +5,11 @@ project( Voxelizer )
 # Prints more information about the compilation process.
 set( CMAKE_VERBOSE_MAKEFILE ON )
 
+# Set the C++ standard to 11 and disable Boost auto-link for the system libarary
+# Both seem to be needed to link against the Anaconda Boost library
+set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DBOOST_SYSTEM_NO_LIB -std=gnu++11")
+
+
 # Collect all relevant files to be sent to the compilers.
 # Also includes these files into the project for easy access.
 # If new files are added, the project files need to be regenerated with cmake.
@@ -20,11 +25,9 @@ if ( UNIX )
 endif ()
 
 # Boost options.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DBOOST_SYSTEM_NO_LIB -std=gnu++11")
 set( Boost_USE_STATIC_LIBS ON )
 set( Boost_USE_MULTITHREADED ON )
 set( Boost_USE_STATIC_RUNTIME OFF )
-set( Boost_NO_BOOST_CMAKE ON )
 
 # Require Boost >= 1.53 with system and thread components.
 find_package( Boost 1.53 REQUIRED COMPONENTS system thread  date_time )
