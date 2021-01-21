@@ -66,8 +66,29 @@ option( GENERATE_TESTS "Adds the compilation of a test program as a target." OFF
 
 # Configuration-dependent settings.
 set( CMAKE_DEBUG_POSTFIX "_d" )
-set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};-gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 )
-set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};-gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 )
+
+
+
+# Set CUDA architecture
+if(CUDA_COMPUTE)
+  set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};
+          -gencode arch=compute_${CUDA_COMPUTE},code=sm_${CUDA_COMPUTE}
+                             )
+
+  set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};
+          -gencode arch=compute_${CUDA_COMPUTE},code=sm_${CUDA_COMPUTE}
+                             )
+else()
+  set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};
+                         -gencode arch=compute_61,code=sm_61
+                         -gencode arch=compute_60,code=sm_60
+                         )
+  set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};
+                         -gencode arch=compute_61,code=sm_61
+                         -gencode arch=compute_60,code=sm_60
+                         )
+endif()
+
 
 # Unix-specific compiler flags.
 if ( UNIX )
