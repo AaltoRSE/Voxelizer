@@ -80,14 +80,14 @@ if(CUDA_COMPUTE)
                              )
 else()
   set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};
-	                          -gencode arch=compute_70,code=sm_60
+	                          -gencode arch=compute_60,code=sm_70
 	                          -gencode arch=compute_61,code=sm_61
 	                          -gencode arch=compute_60,code=sm_60
 	                          -gencode arch=compute_52,code=sm_52
 	                          -gencode arch=compute_37,code=sm_37
                          )
   set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};
-	                          -gencode arch=compute_70,code=sm_60
+	                          -gencode arch=compute_60,code=sm_70
 	                          -gencode arch=compute_61,code=sm_61
 	                          -gencode arch=compute_60,code=sm_60
 	                          -gencode arch=compute_52,code=sm_52
