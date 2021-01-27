@@ -70,14 +70,14 @@ set( CMAKE_DEBUG_POSTFIX "_d" )
 
 
 # Set CUDA architecture
-if(CUDA_COMPUTE)
+if(CUDA_GENCODE)
   set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};
-          -gencode arch=compute_${CUDA_COMPUTE},code=sm_${CUDA_COMPUTE}
-                             )
+                            -gencode ${CUDA_GENCODE}
+                         )
 
   set( CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG};
-          -gencode arch=compute_${CUDA_COMPUTE},code=sm_${CUDA_COMPUTE}
-                             )
+                            -gencode ${CUDA_GENCODE}
+                         )
 else()
   set( CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE};
 	                          -gencode arch=compute_60,code=sm_70
