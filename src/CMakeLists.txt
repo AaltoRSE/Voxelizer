@@ -1,12 +1,12 @@
 # Sets up a build target for the Voxelizer that makes a library with CUDA.
-cuda_add_library( Voxelizer STATIC ${SOURCE_FILES} ${HEADER_FILES} )
+add_library( Voxelizer STATIC ${SOURCE_FILES} ${HEADER_FILES} )
 
 # Sets library directories.
 target_link_libraries( Voxelizer ${Boost_LIBRARIES} )
 
 # Install: Copies the library to <InstallDir>/lib
 install( TARGETS Voxelizer
-		 ARCHIVE DESTINATION lib 
+		 ARCHIVE DESTINATION lib
 		 CONFIGURATIONS Debug Release )
 
 # Install: Copies the .h files to <InstallDir>/include
@@ -15,7 +15,7 @@ install( DIRECTORY ../include
 		 CONFIGURATIONS Debug Release )
 
 if ( WIN32 )
-	# Separates the Boost library paths into separate containers depending on 
+	# Separates the Boost library paths into separate containers depending on
 	# if they are release or debug libraries.
 	foreach ( ELEM ${Boost_LIBRARIES} )
 		if ( ${ELEM} MATCHES "^optimized$" )
@@ -32,11 +32,11 @@ if ( WIN32 )
 	unset( BLN_LOOP_RELEASE )
 
 	# Install: Copies the appropriate Boost libraries to <InstallDir>/lib
-	install( FILES ${BOOST_LIBNAMES_RELEASE} 
+	install( FILES ${BOOST_LIBNAMES_RELEASE}
 			DESTINATION lib
 			CONFIGURATIONS Release )
-		 
-	install( FILES ${BOOST_LIBNAMES_DEBUG} 
+
+	install( FILES ${BOOST_LIBNAMES_DEBUG}
 			DESTINATION lib
 			CONFIGURATIONS Debug )
 endif ()

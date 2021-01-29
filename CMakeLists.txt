@@ -1,13 +1,14 @@
 cmake_minimum_required( VERSION 2.8 )
 
-project( Voxelizer )
+project( Voxelizer CXX CUDA)
 
 # Prints more information about the compilation process.
 set( CMAKE_VERBOSE_MAKEFILE ON )
 
 # Set the C++ standard to 11 and disable Boost auto-link for the system libarary
 # Both seem to be needed to link against the Anaconda Boost library
-set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DBOOST_SYSTEM_NO_LIB -std=gnu++11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DBOOST_SYSTEM_NO_LIB -std=gnu++11 -fPIC")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DBOOST_SYSTEM_NO_LIB -Xcompiler -std=gnu++11 -Xcompiler -fPIC")
 
 
 # Collect all relevant files to be sent to the compilers.
@@ -40,8 +41,6 @@ else ()
 	set( BOOST_ROOT "" CACHE PATH "Path to Boost root directory." )
 endif ()
 
-# Require CUDA >= 5.0
-find_package( CUDA 5.0 REQUIRED )
 
 # CUDA 5.0 doesn't support gcc 4.7 and above.
 if ( UNIX AND (CUDA_VERSION VERSION_LESS "5.5") )
