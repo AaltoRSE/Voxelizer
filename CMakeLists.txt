@@ -10,7 +10,7 @@ set( CMAKE_VERBOSE_MAKEFILE ON )
 # Set the C++ standard to 11 and disable Boost auto-link for the system libarary
 # Both seem to be needed to link against the Anaconda Boost library
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DBOOST_SYSTEM_NO_LIB -std=gnu++11 -fPIC")
-set(CMAKE_CUDA_FLAGS "CMAKE_CUDA_FLAGS} -DBOOST_SYSTEM_NO_LIB -Xcompiler -std=gnu++11 -Xcompiler -fPIC")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DBOOST_SYSTEM_NO_LIB -Xcompiler -std=gnu++11 -Xcompiler -fPIC")
 
 if(NOT "$ENV{CONDA_PREFIX}" STREQUAL "")
   # have nvcc use the default c++ compiler, if defined
